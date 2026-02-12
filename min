@@ -1,8 +1,0 @@
-#!/bin/bash
-# Toggles showing the desktop (minimizing/restoring all windows)
-CURRENT=$(xprop -root _NET_SHOWING_DESKTOP | awk '{print $3}')
-if [ "$CURRENT" = "1" ]; then
-    xprop -root -f _NET_SHOWING_DESKTOP 32c -set _NET_SHOWING_DESKTOP 0
-else
-    xprop -root -f _NET_SHOWING_DESKTOP 32c -set _NET_SHOWING_DESKTOP 1
-fi
