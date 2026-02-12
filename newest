@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# Default values
+DIR="."
+COUNT=8
+
+# Help function
+usage() {
+    echo "Usage: $0 [DIRECTORY] [COUNT]"
+    echo "Lists the newest files in a directory tree with human-readable sizes."
+    echo ""
+    echo "Example: $0 . 20"
+    exit 0
+}
+
+# Parse arguments
+if [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
+    usage
+fi
+
+if [ -n "$1" ]; then
+    DIR="$1"
+fi
+
+if [ -n "$2" ]; then
+    COUNT="$2"
+fi
+
+# Check if directory exists
+if [ ! -d "$DIR" ]; then
+    echo "Error: Directory '$DIR' not found."
+    exit 1
+fi
+
+# Run the command
+# 1. find: prints files with timestamp in seconds (%T@) and path (%p)
+# 2. sort: numerically sorts in reverse (newest first)
+# 3. head: limits to COUNT
+# 4. cut: removes the timestamp
+# 5. xargs: passes files to ls, handling spaces (-d '\n')
+# 6. ls: lists with human-readable sizes (-h) and sorts by time (-t) to maintain order
+find "$DIR" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n "$COUNT" | cut -d' ' -f2- | xargs -d '\n' ls -lht --color=auto

@@ -1,0 +1,9 @@
+#!/bin/bash
+# Opens the Google Doc Template
+URL="https://docs.google.com/document/d/15XVAEj4ljdHIuutK0BDrtY9MHm0uYiyPRD_wQcDQxqw/copy?id=15XVAEj4ljdHIuutK0BDrtY9MHm0uYiyPRD_wQcDQxqw&copyCollaborators=false&copyComments=false&includeResolvedCommentsOnCopy=false&title=Untitled%20document&token=AC4w5VjyngM1LVpsyx5hCB_kSt4ISkzr6A%3A1701977854909&usp=docs_web&ouid=106160719635456266010"
+
+if command -v xdg-open &> /dev/null; then
+    xdg-open "$URL"
+else
+    firefox "$URL"
+fi

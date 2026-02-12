@@ -1,0 +1,142 @@
+#!/bin/bash
+# Set XFCE power management settings based on screen blank time
+
+if [ -z "$1" ]; then
+    echo "Usage: $0 <screen-blank-minutes>"
+    echo ""
+    echo "Example: $0 10"
+    echo "  Sets screen blank to 10 minutes"
+    echo "  Sets DPMS sleep to 11 minutes (blank + 1)"
+    echo "  Sets DPMS off to 12 minutes (sleep + 1)"
+    echo "  Sets system suspend to 30 minutes (blank × 3)"
+    exit 1
+fi
+
+# Validate input is a number
+if ! [[ "$1" =~ ^[0-9]+$ ]]; then
+    echo "Error: Please provide a valid number"
+    exit 1
+fi
+
+CONFIG_FILE="$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Error: Configuration file not found at $CONFIG_FILE"
+    exit 1
+fi
+
+# Get the base time from user input
+BLANK_TIME=$1
+
+# Special case for 0: use minimal values for quick screen off
+if [ "$BLANK_TIME" -eq 0 ]; then
+    BLANK_TIME=1
+    DPMS_SLEEP_TIME=1
+    DPMS_OFF_TIME=1
+    SUSPEND_TIME=2
+else
+    DPMS_SLEEP_TIME=$((BLANK_TIME + 1))
+    DPMS_OFF_TIME=$((BLANK_TIME + 2))
+    SUSPEND_TIME=$((BLANK_TIME * 3))
+fi
+
+echo "Setting power management values:"
+echo "  Screen blank:        $BLANK_TIME minutes"
+echo "  DPMS sleep:          $DPMS_SLEEP_TIME minutes"
+echo "  DPMS off:            $DPMS_OFF_TIME minutes"
+echo "  System suspend:      $SUSPEND_TIME minutes"
+echo ""
+
+# Set environment variables for xfconf
+export DISPLAY=${DISPLAY:-:0.0}
+uid=$(id -u)
+export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$uid/bus}
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$uid}
+
+# Try using xfconf-query first
+# echo "Attempting to use xfconf-query..."
+USE_XFCONF=true
+
+# Test if xfconf-query works by trying to set one value
+xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac -s $BLANK_TIME 2>/dev/null
+if [ $? -ne 0 ]; then
+    # Try with --create flag
+    xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac -n -t int -s $BLANK_TIME 2>/dev/null
+    if [ $? -ne 0 ]; then
+        echo "xfconf-query failed, falling back to XML modification..."
+        USE_XFCONF=false
+    fi
+fi
+
+if [ "$USE_XFCONF" = true ]; then
+    # Use xfconf-query method
+    echo -n "Using xfconf-query to apply settings...  "
+
+    xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac -s $BLANK_TIME 2>/dev/null || \
+      xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac -n -t int -s $BLANK_TIME
+
+    xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-sleep -s $DPMS_SLEEP_TIME 2>/dev/null || \
+      xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-sleep -n -t uint -s $DPMS_SLEEP_TIME
+
+    xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-off -s $DPMS_OFF_TIME 2>/dev/null || \
+      xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-off -n -t uint -s $DPMS_OFF_TIME
+
+    xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/inactivity-on-ac -s $SUSPEND_TIME 2>/dev/null || \
+      xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/inactivity-on-ac -n -t uint -s $SUSPEND_TIME
+
+    xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-enabled -s true 2>/dev/null || \
+      xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-enabled -n -t bool -s true
+
+    xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/inactivity-sleep-mode-on-ac -s 1 2>/dev/null || \
+      xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/inactivity-sleep-mode-on-ac -n -t uint -s 1
+
+    echo "Settings applied successfully using xfconf-query."
+else
+    # Fall back to XML modification
+    echo "Using XML file modification..."
+
+    # Create backup
+    cp "$CONFIG_FILE" "$CONFIG_FILE.backup"
+
+    # Function to update or add a property
+    update_property() {
+        local prop_name="$1"
+        local prop_type="$2"
+        local prop_value="$3"
+        local tmpfile=$(mktemp)
+
+        if grep -q "name=\"$prop_name\"" "$CONFIG_FILE"; then
+            # Property exists, update it
+            sed "s|name=\"$prop_name\" type=\"[^\"]*\" value=\"[^\"]*\"|name=\"$prop_name\" type=\"$prop_type\" value=\"$prop_value\"|" "$CONFIG_FILE" > "$tmpfile"
+        else
+            # Property doesn't exist, add it before the closing </property> tag
+            sed "/<\/property>$/i\\    <property name=\"$prop_name\" type=\"$prop_type\" value=\"$prop_value\"/>" "$CONFIG_FILE" > "$tmpfile"
+        fi
+
+        mv "$tmpfile" "$CONFIG_FILE"
+    }
+
+    # Update all properties
+    update_property "blank-on-ac" "int" "$BLANK_TIME"
+    update_property "dpms-on-ac-sleep" "uint" "$DPMS_SLEEP_TIME"
+    update_property "dpms-on-ac-off" "uint" "$DPMS_OFF_TIME"
+    update_property "inactivity-on-ac" "uint" "$SUSPEND_TIME"
+    update_property "dpms-enabled" "bool" "true"
+    update_property "inactivity-sleep-mode-on-ac" "uint" "1"
+
+    echo "Settings applied successfully via XML modification!"
+    echo "Backup saved to: $CONFIG_FILE.backup"
+    echo ""
+    echo "Note: Changes will take effect after restarting xfce4-power-manager"
+    echo "Run: killall xfce4-power-manager ; xfce4-power-manager &"
+fi
+
+#echo ""
+#echo -n "Running show-power-settings in: "
+#for i in 6 5 4 3 2 1; do
+#    echo -ne "\r\t\t\t\t$i seconds\r"
+#    sleep 1
+#done
+#echo "                                        "
+#echo ""
+#show-power-settings

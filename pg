@@ -1,0 +1,2 @@
+#!/bin/sh
+grep -n -C 3 --color=always "$@" *Physics.*

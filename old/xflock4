@@ -1,0 +1,10 @@
+#!/bin/bash
+# Custom xflock4 wrapper created by Gemini to fix "none of the screen lock tools were successful"
+# Uses dm-tool (LightDM) to lock the session since light-locker is crashing.
+
+if command -v dm-tool >/dev/null 2>&1; then
+    dm-tool lock
+else
+    echo "dm-tool not found. Cannot lock screen." >&2
+    exit 1
+fi

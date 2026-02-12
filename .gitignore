@@ -1,0 +1,16 @@
+# Claude-specific files
+.claude/
+
+# Large binaries (downloaded tools)
+*.AppImage
+mdcat
+opencode
+atop
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Local logs (if any)
+*.log
