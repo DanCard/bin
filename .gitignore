@@ -14,3 +14,6 @@ __pycache__/
 
 # Local logs (if any)
 *.log
+
+# audio files
+*.m4a

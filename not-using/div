@@ -1,0 +1,23 @@
+#!/bin/bash
+# Launch Divinity Original Sin 2 (Definitive Edition) directly, bypassing the launcher.
+
+# Steam and Game Paths
+STEAM_ROOT="$HOME/.steam/debian-installation"
+GAME_ROOT="$STEAM_ROOT/steamapps/common/Divinity Original Sin 2"
+PROTON_ROOT="$STEAM_ROOT/steamapps/common/Proton - Experimental"
+COMPAT_DATA="$STEAM_ROOT/steamapps/compatdata/435150"
+RUNTIME_ROOT="$STEAM_ROOT/steamapps/common/SteamLinuxRuntime_sniper"
+
+# Game Executable
+GAME_EXE="$GAME_ROOT/DefEd/bin/EoCApp.exe"
+
+# Export necessary environment variables for Proton
+export STEAM_COMPAT_DATA_PATH="$COMPAT_DATA"
+export STEAM_COMPAT_CLIENT_INSTALL_PATH="$STEAM_ROOT"
+export SteamAppId=435150
+export SteamGameId=435150
+
+echo "Launching Divinity Original Sin 2 (DefEd) directly with Steam Runtime..."
+
+"$RUNTIME_ROOT/run" -- \
+"$PROTON_ROOT/proton" run "$GAME_EXE" "$@"

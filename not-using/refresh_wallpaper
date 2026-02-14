@@ -1,0 +1,18 @@
+#!/bin/bash
+
+# Find all last-image properties in xfce4-desktop
+PROPS=$(xfconf-query -c xfce4-desktop -l | grep last-image)
+
+for prop in $PROPS; do
+    # Get current image path
+    CURRENT_IMAGE=$(xfconf-query -c xfce4-desktop -p "$prop")
+    
+    if [ -n "$CURRENT_IMAGE" ] && [ "$CURRENT_IMAGE" != "ERROR" ]; then
+        echo "Refreshing $prop..."
+        # Toggle to empty and back to force a refresh
+        xfconf-query -c xfce4-desktop -p "$prop" -s ""
+        xfconf-query -c xfce4-desktop -p "$prop" -s "$CURRENT_IMAGE"
+    fi
+done
+
+echo "Wallpaper refresh complete."
