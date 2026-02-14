@@ -1,14 +1,23 @@
 #!/bin/bash
-# Set XFCE power management settings based on screen blank time
+# set-power-settings - Configure XFCE and DPMS power management timeouts
+#
+# WHAT THIS DOES:
+#   Sets screen blanking, DPMS (monitor sleep/off), and system suspend
+#   timeouts based on a single input value. It calculates a logical
+#   progression to prevent the system from sleeping before the screen blanks.
+#
+# LOGIC:
+#   Input: <minutes> (e.g., 10)
+#   1. Screen Blank: <minutes> (10m)
+#   2. DPMS Sleep:   <minutes> + 1 (11m)
+#   3. DPMS Off:     <minutes> + 2 (12m)
+#   4. Suspend:      <minutes> * 3 (30m)
+#
+# USAGE:
+#   set-power-settings 10   # Set for 10-minute active window
 
 if [ -z "$1" ]; then
     echo "Usage: $0 <screen-blank-minutes>"
-    echo ""
-    echo "Example: $0 10"
-    echo "  Sets screen blank to 10 minutes"
-    echo "  Sets DPMS sleep to 11 minutes (blank + 1)"
-    echo "  Sets DPMS off to 12 minutes (sleep + 1)"
-    echo "  Sets system suspend to 30 minutes (blank × 3)"
     exit 1
 fi
 

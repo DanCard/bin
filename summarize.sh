@@ -1,14 +1,32 @@
 #!/bin/bash
-
-# Generate detailed meeting notes from a transcription using local llama-server
-# Usage: summarize.sh <transcript.txt> [output.md]
+# summarize.sh - Generate structured meeting notes using local LLM
+#
+# WHAT THIS DOES:
+#   Takes a text transcript (e.g., from transcribe.py) and sends it to a
+#   locally running llama-server to generate a structured summary.
+#
+# HOW IT WORKS:
+#   1. Reads the transcript file.
+#   2. Constructs a prompt asking for:
+#      - Meeting Title & Date
+#      - Key Participants
+#      - Main Discussion Points
+#      - Action Items & Decisions
+#   3. Calls the llama-server API (default: localhost:8080).
+#   4. Outputs Markdown to a file or stdout.
+#
+# USAGE:
+#   summarize.sh transcript.txt [summary.md]
+#
+# REQUIRES: 
+#   - llama-server (running with a model like Llama-3 or Mistral)
+#   - curl, jq
 
 LLAMA_URL="${LLAMA_URL:-http://localhost:8080}"
 MAX_TOKENS="${MAX_TOKENS:-8192}"
 
 if [ -z "$1" ]; then
-    echo "Usage: summarize.sh <transcript.txt> [output.md]"
-    echo "  If output.md is not given, prints to stdout."
+    echo "Usage: $0 <transcript.txt> [output.md]"
     echo ""
     echo "Environment variables:"
     echo "  LLAMA_URL    - llama-server URL (default: http://localhost:8080)"
