@@ -5,8 +5,9 @@
 #===============================================================================
 #
 # DESCRIPTION:
-#   Logs the top 4 CPU-consuming processes every 30 seconds to a dated log file.
-#   Format: [HH:MM:SS] Process1: CPU% Process2: CPU% Process3: CPU% Process4: CPU%
+#   Logs the top N CPU-consuming processes every 30 seconds to a dated log file.
+#   Automatically cleans up logs older than 30 days.
+#   Format: [HH:MM:SS] CPU% Process1  CPU% Process2  CPU% Process3  CPU% Process4
 #
 # LOG LOCATION:
 #   ~/misc/logs/top-cpu-concise-YYYY-MM-DD.log
@@ -24,35 +25,40 @@
 #
 #===============================================================================
 
-LOG_DIR="$HOME/misc/logs"
-INTERVAL=30
+# --- Configuration ---
+LOG_DIR="$HOME/misc/logs"       # Directory for log files
+INTERVAL=30                     # Seconds between each snapshot
+TOP_N=4                         # Number of top CPU processes to log
+LOG_RETENTION_DAYS=180          # Delete log files older than this many days
+SEPARATOR="\t"                  # Separator between process entries
 
 # Ensure log directory exists
 mkdir -p "$LOG_DIR"
 
+# Graceful shutdown on SIGTERM/SIGINT
+trap 'echo "[$(date "+%Y-%m-%d %H:%M:%S")] Logger stopped"; exit 0' SIGTERM SIGINT
+
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting concise top CPU logger"
 
 while true; do
-    CURRENT_DATE=$(date +%Y-%m-%d)
-    TIMESTAMP=$(date '+%H:%M:%S')
-    
-    # Fetch top 4 processes by %CPU
-    # comm: process name
-    # pcpu: cpu percentage
-    # Vertically align the process name and CPU usage percentage
-    TOP_PROCS=$(ps -eo comm,pcpu --sort=-pcpu --no-headers | head -n 4 | awk '{
-        cpu=$NF; 
-        $NF=""; sub(/[ \t]+$/, ""); 
-        name=$0;
-        # Entry format: Name (20 chars) + CPU (5 chars) + %
-        entry=sprintf("%-20s %5s%%", name ":", cpu);
-        # Column width of 30 for first three entries
-        if (NR < 4) printf "%-30s ", entry;
+    # Single date call to avoid race condition at midnight
+    DATETIME=$(date '+%Y-%m-%d %H:%M:%S')
+    CURRENT_DATE=${DATETIME%% *}
+    TIMESTAMP=${DATETIME##* }
+
+    # Clean up logs older than retention period
+    find "$LOG_DIR" -name "top-cpu-concise-*.log" -mtime +$LOG_RETENTION_DAYS -delete 2>/dev/null
+
+    # Fetch top N processes by %CPU, separated compactly
+    TOP_PROCS=$(ps -eo pcpu,comm --sort=-pcpu --no-headers | head -n $TOP_N | awk -v top_n="$TOP_N" -v sep="$SEPARATOR" '{
+        cpu=$1; name=$2;
+        entry=sprintf("%5s%% %s", cpu, name);
+        if (NR < top_n) printf "%s%s", entry, sep;
         else printf "%s", entry;
     }')
-    
+
     # Log to daily file
     echo "[$TIMESTAMP] $TOP_PROCS" >> "$LOG_DIR/top-cpu-concise-$CURRENT_DATE.log"
-    
+
     sleep "$INTERVAL"
 done
