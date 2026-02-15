@@ -38,6 +38,7 @@ MODEL_ID = MODELS["mini"]  # default to mini
 CACHE_DIR = os.path.expanduser("~/llms/mistral/")
 CHUNK_SECONDS = 300  # 5 min chunks
 OVERLAP_SECONDS = 30
+MIN_CHUNK_SECONDS = 30  # skip chunks shorter than this to avoid hallucination
 
 logging.basicConfig(
     level=logging.INFO,
@@ -130,6 +131,72 @@ def get_audio_duration(path):
     return float(result.stdout.strip())
 
 
+def parse_voxtral_timestamps(text, chunk_start):
+    """Parse Voxtral's inline timestamps and convert to absolute times.
+
+    Voxtral outputs timestamps like:
+      [ 0m1s310ms - 0m5s300ms ] Some text here.
+    Returns list of {"start": abs_s, "end": abs_s, "text": str}.
+    If no timestamps found, returns the whole text as one segment.
+    """
+    import re
+    pattern = r'\[\s*(\d+)m(\d+)s(\d+)ms\s*-\s*(\d+)m(\d+)s(\d+)ms\s*\]\s*(.*?)(?=\[\s*\d+m|\Z)'
+    matches = re.findall(pattern, text, re.DOTALL)
+
+    if not matches:
+        # No timestamps - return whole text as one segment spanning the chunk
+        return [{"start": chunk_start, "end": chunk_start, "text": text.strip()}]
+
+    segments = []
+    for m in matches:
+        s = chunk_start + int(m[0]) * 60 + int(m[1]) + int(m[2]) / 1000
+        e = chunk_start + int(m[3]) * 60 + int(m[4]) + int(m[5]) / 1000
+        t = m[6].strip()
+        if t:
+            segments.append({"start": s, "end": e, "text": t})
+    return segments
+
+
+def merge_transcript_diarization(transcripts, diarization, Segment):
+    """Merge Voxtral chunk transcripts with pyannote diarization.
+
+    For each text segment, find the diarization speaker with max overlap.
+    """
+    # Parse all chunks into segments with absolute timestamps
+    all_segments = []
+    for chunk in transcripts:
+        parsed = parse_voxtral_timestamps(chunk["text"], chunk["start"])
+        for seg in parsed:
+            # For segments without end time, estimate from text length
+            if seg["end"] <= seg["start"]:
+                seg["end"] = chunk["end"]
+            all_segments.append(seg)
+
+    # Assign speakers from diarization
+    merged = []
+    for seg in all_segments:
+        text_seg = Segment(seg["start"], seg["end"])
+        speakers = []
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            overlap = text_seg & turn
+            if overlap:
+                speakers.append((speaker, overlap.duration))
+
+        if speakers:
+            best_speaker = max(speakers, key=lambda x: x[1])[0]
+        else:
+            best_speaker = "Unknown"
+
+        merged.append({
+            "start": seg["start"],
+            "end": seg["end"],
+            "speaker": best_speaker,
+            "text": seg["text"],
+        })
+
+    return merged
+
+
 def run_benchmark(args):
     """Quick benchmark on a single file - no chunking, no diarization."""
     model, processor = load_model()
@@ -217,6 +284,10 @@ def run_full(args):
 
     for i, start_ms in enumerate(range(0, len(audio), chunk_ms - overlap_ms)):
         end_ms = min(start_ms + chunk_ms, len(audio))
+        chunk_duration_s = (end_ms - start_ms) / 1000
+        if chunk_duration_s < MIN_CHUNK_SECONDS:
+            log.info(f"Skipping chunk {i}: {chunk_duration_s:.0f}s < {MIN_CHUNK_SECONDS}s minimum")
+            continue
         chunk = audio[start_ms:end_ms]
         chunk_path = os.path.join(args.output, f"_chunk_{i}.wav")
         chunk.export(chunk_path, format="wav", parameters=["-ar", "16000", "-ac", "1"])
@@ -228,10 +299,8 @@ def run_full(args):
 
     time_transcribe = time.time() - t0
 
-    # --- Merge with diarization ---
-    # Simple: for each diarization segment, find the chunk that covers it
-    # and attribute the speaker label
-    full_text = " ".join(t["text"] for t in transcripts)
+    # --- Merge transcription with diarization ---
+    merged = merge_transcript_diarization(transcripts, diarization, Segment)
 
     # Output
     base = os.path.basename(args.audio)
@@ -239,12 +308,13 @@ def run_full(args):
     out_json = os.path.join(args.output, base + ".json")
 
     with open(out_txt, "w") as f:
-        for t in transcripts:
-            f.write(f"[{format_time(t['start'])} --> {format_time(t['end'])}]\n{t['text']}\n\n")
+        for seg in merged:
+            f.write(f"[{format_time(seg['start'])} --> {format_time(seg['end'])}] {seg['speaker']}: {seg['text']}\n")
 
     with open(out_json, "w") as f:
-        json.dump({"transcripts": transcripts, "full_text": full_text}, f, indent=2)
+        json.dump(merged, f, indent=2)
 
+    speakers = set(s["speaker"] for s in merged)
     rtf = (time_transcribe + time_diar) / duration
     print(f"\n{'='*50}")
     print(f"  FULL PIPELINE RESULT")
@@ -253,6 +323,8 @@ def run_full(args):
     print(f"  Diarization    : {time_diar:.1f}s")
     print(f"  Transcription  : {time_transcribe:.1f}s")
     print(f"  RTF            : {rtf:.2f}x")
+    print(f"  Segments       : {len(merged)}")
+    print(f"  Speakers       : {len(speakers)} ({', '.join(sorted(speakers))})")
     print(f"  Output         : {out_txt}")
     print(f"{'='*50}\n")
 
