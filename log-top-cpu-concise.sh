@@ -5,8 +5,8 @@
 #===============================================================================
 #
 # DESCRIPTION:
-#   Logs the top 3 CPU-consuming processes every 30 seconds to a dated log file.
-#   Format: [HH:MM:SS] Process1: CPU% Process2: CPU% Process3: CPU%
+#   Logs the top 4 CPU-consuming processes every 30 seconds to a dated log file.
+#   Format: [HH:MM:SS] Process1: CPU% Process2: CPU% Process3: CPU% Process4: CPU%
 #
 # LOG LOCATION:
 #   ~/misc/logs/top-cpu-concise-YYYY-MM-DD.log
@@ -36,18 +36,18 @@ while true; do
     CURRENT_DATE=$(date +%Y-%m-%d)
     TIMESTAMP=$(date '+%H:%M:%S')
     
-    # Fetch top 3 processes by %CPU
+    # Fetch top 4 processes by %CPU
     # comm: process name
     # pcpu: cpu percentage
     # Vertically align the process name and CPU usage percentage
-    TOP_PROCS=$(ps -eo comm,pcpu --sort=-pcpu --no-headers | head -n 3 | awk '{
+    TOP_PROCS=$(ps -eo comm,pcpu --sort=-pcpu --no-headers | head -n 4 | awk '{
         cpu=$NF; 
         $NF=""; sub(/[ \t]+$/, ""); 
         name=$0;
         # Entry format: Name (20 chars) + CPU (5 chars) + %
         entry=sprintf("%-20s %5s%%", name ":", cpu);
-        # Column width of 30 for first two entries
-        if (NR < 3) printf "%-30s ", entry;
+        # Column width of 30 for first three entries
+        if (NR < 4) printf "%-30s ", entry;
         else printf "%s", entry;
     }')
     
