@@ -61,6 +61,8 @@ while true; do
         comm = substr(rest, 1, 15); sub(/ +$/, "", comm);
         args_str = substr(rest, 17); sub(/^ +/, "", args_str);
         sub(/^\/[^ ]*\//, "", args_str);
+        gsub(/\/home\/[^/ ]+\//, "", args_str);
+        gsub(/\/usr(\/local)?\/(s?bin|libexec)\//, "", args_str);
         if (index(args_str, comm) == 1) {
             extra = substr(args_str, length(comm) + 1); sub(/^ +/, "", extra);
         } else {
