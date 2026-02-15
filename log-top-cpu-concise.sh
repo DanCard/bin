@@ -1,10 +1,27 @@
 #!/bin/bash
 
 #===============================================================================
-# CONCISE TOP CPU PROCESS LOGGER
+# CONCISE TOP CPU PROCESS LOGGER - README
 #===============================================================================
-# Logs the top 2 CPU-consuming processes on a single line every 30 seconds.
-# Format: [HH:MM:SS] Process1: CPU% Process2: CPU%
+#
+# DESCRIPTION:
+#   Logs the top 2 CPU-consuming processes every 30 seconds to a dated log file.
+#   Format: [HH:MM:SS] Process1: CPU% Process2: CPU%
+#
+# LOG LOCATION:
+#   ~/misc/logs/top-cpu-concise-YYYY-MM-DD.log
+#
+# SERVICE COMMANDS:
+#   systemctl --user status log-top-cpu.service   # Check status
+#   systemctl --user stop log-top-cpu.service     # Stop logging
+#   systemctl --user start log-top-cpu.service    # Start logging
+#   systemctl --user restart log-top-cpu.service  # Restart after script changes
+#   systemctl --user disable log-top-cpu.service  # Disable auto-start
+#   systemctl --user enable log-top-cpu.service   # Enable auto-start
+#
+# VIEWING LOGS:
+#   tail -f ~/misc/logs/top-cpu-concise-$(date +%Y-%m-%d).log # Live view
+#
 #===============================================================================
 
 LOG_DIR="$HOME/misc/logs"
