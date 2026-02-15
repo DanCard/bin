@@ -39,12 +39,13 @@ while true; do
     # Fetch top 2 processes by %CPU
     # comm: process name
     # pcpu: cpu percentage
-    # Handling process names with spaces (e.g., 'Isolated Web Co')
+    # Vertically align both the process name and the CPU usage percentage
     TOP_PROCS=$(ps -eo comm,pcpu --sort=-pcpu --no-headers | head -n 2 | awk '{
         cpu=$NF; 
         $NF=""; sub(/[ \t]+$/, ""); 
         name=$0;
-        entry=sprintf("%s: %s%%", name, cpu);
+        # Entry format: Name (20 chars) + CPU (5 chars) + %
+        entry=sprintf("%-20s %5s%%", name ":", cpu);
         if (NR==1) printf "%-30s ", entry;
         else printf "%s", entry;
     }')
