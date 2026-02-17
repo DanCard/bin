@@ -36,12 +36,12 @@ if [ "$BLANK_TIME" -eq 0 ]; then
     DPMS_SLEEP_TIME=1
     DPMS_OFF_TIME=1
     SUSPEND_TIME=1
-    BRIGHTNESS_TIMEOUT=500  # 500 milliseconds
 else
     DPMS_SLEEP_TIME=$((BLANK_TIME + 1))
     DPMS_OFF_TIME=$((BLANK_TIME + 2))
     if [ "$BLANK_TIME" -le 1 ]; then
-        SUSPEND_TIME=$((BLANK_TIME + 3))
+	    BRIGHTNESS_TIMEOUT=500  # 500 milliseconds
+        SUSPEND_TIME=$((BLANK_TIME + 2))
     else
         SUSPEND_TIME=$((BLANK_TIME * (BLANK_TIME + 1)))
     fi
