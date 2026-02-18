@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# To manage the associated service:
+#   systemctl --user status log-top-cpu-concise-thermal.service
+#   systemctl --user restart log-top-cpu-concise-thermal.service
+#   systemctl --user stop log-top-cpu-concise-thermal.service
+#   systemctl --user start log-top-cpu-concise-thermal.service
+
 # Concise top CPU logger with expanded temperature summary on one line.
 # Abbreviation legend used in log output:
 # - r8169                 = r8169_0_c100:00/temp1
@@ -13,8 +19,8 @@ TOP_N=3
 TEMP_N=5
 TEMP_DECIMALS=0
 TEMP_LABEL_WIDTH=6
-PROC_NAME_WIDTH=21
-COMM_WIDTH=14
+PROC_NAME_WIDTH=22
+COMM_WIDTH=15
 LOG_RETENTION_DAYS=180
 LOG_PREFIX="top-cpu-concise-thermal"
 
