@@ -19,7 +19,7 @@ TOP_N=3
 TEMP_N=5
 TEMP_DECIMALS=0
 TEMP_LABEL_WIDTH=6
-PROC_NAME_WIDTH=22
+PROC_NAME_WIDTH=18
 COMM_WIDTH=15
 LOG_RETENTION_DAYS=180
 LOG_PREFIX="top-cpu-concise-thermal"
@@ -128,8 +128,8 @@ get_temp_summary() {
         fi
 
         # Suspected stuck sensor filter:
-        # hide nvm0 2 when its one-decimal display value is 74.8C.
-        if [[ "$sensor" == "nvm0 2" ]]; then
+        # hide nvm0 2 or nvm1 2 when its one-decimal display value is 74.8C.
+        if [[ "$sensor" == "nvm0 2" || "$sensor" == "nvm1 2" ]]; then
             if (( mc / 100 == 748 )); then
                 continue
             fi
