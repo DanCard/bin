@@ -12,9 +12,9 @@ INTERVAL=30
 TOP_N=3
 TEMP_N=5
 TEMP_DECIMALS=0
-TEMP_LABEL_WIDTH=8
-PROC_NAME_WIDTH=22
-COMM_WIDTH=15
+TEMP_LABEL_WIDTH=6
+PROC_NAME_WIDTH=21
+COMM_WIDTH=14
 LOG_RETENTION_DAYS=180
 LOG_PREFIX="top-cpu-concise-thermal"
 
@@ -92,8 +92,9 @@ get_temp_summary() {
             base="r8169"
         elif [[ "$base" == mt7925_phy* ]]; then
             base="mt7925"
-        elif [[ "$base" =~ ^nvme[0-9]+$ ]]; then
-            base="nvm"
+        elif [[ "$base" =~ ^nvme([0-9]+)$ ]]; then
+            local idx="${BASH_REMATCH[1]}"
+            base="nvm$idx"
         fi
 
         lbl="${lbl//Sensor /S}"
@@ -109,10 +110,10 @@ get_temp_summary() {
                 sensor="r8169"
             elif [[ "$base" == "mt7925" && "$lbl" == "1" ]]; then
                 sensor="mt7925"
-            elif [[ "$base" == "nvm" && "$lbl" == "Composite" ]]; then
-                sensor="composite"
-            elif [[ "$base" == "nvm" && "$lbl" =~ ^[0-9]+$ ]]; then
-                sensor="nvm $lbl"
+            elif [[ "$base" == nvm* && "$lbl" == "Composite" ]]; then
+                sensor="compo${base#nvm}"
+            elif [[ "$base" == nvm* && "$lbl" =~ ^[0-9]+$ ]]; then
+                sensor="$base $lbl"
             else
                 sensor="$base/$lbl"
             fi
@@ -121,8 +122,8 @@ get_temp_summary() {
         fi
 
         # Suspected stuck sensor filter:
-        # hide nvm 2 when its one-decimal display value is 74.8C.
-        if [[ "$sensor" == "nvm 2" ]]; then
+        # hide nvm0 2 when its one-decimal display value is 74.8C.
+        if [[ "$sensor" == "nvm0 2" ]]; then
             if (( mc / 100 == 748 )); then
                 continue
             fi
@@ -142,13 +143,13 @@ get_temp_summary() {
 get_top_procs() {
     ps -eo pcpu,comm:${COMM_WIDTH},args --sort=-pcpu --no-headers \
         | head -n "$TOP_N" \
-        | awk -v top_n="$TOP_N" -v name_w="$PROC_NAME_WIDTH" '
+        | awk -v top_n="$TOP_N" -v name_w="$PROC_NAME_WIDTH" -v comm_w="$COMM_WIDTH" '
             {
                 cpu = $1;
                 line = $0; match(line, /[0-9.]+/);
                 rest = substr(line, RSTART + RLENGTH); sub(/^ +/, "", rest);
-                comm = substr(rest, 1, 15); sub(/ +$/, "", comm);
-                args_str = substr(rest, 17); sub(/^ +/, "", args_str);
+                comm = substr(rest, 1, comm_w); sub(/ +$/, "", comm);
+                args_str = substr(rest, comm_w + 2); sub(/^ +/, "", args_str);
 
                 sub(/^\/[^ ]*\//, "", args_str);
                 gsub(/\/home\/[^/ ]+\//, "", args_str);
