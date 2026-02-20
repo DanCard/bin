@@ -53,7 +53,6 @@ dpms_o=$(get_xf "dpms-on-ac-off")
 
 # SUSPEND Data
 inact=$(get_xf "inactivity-on-ac")
-mode=$(get_xf "inactivity-sleep-mode-on-ac")
 lock=$(get_xf "lock-screen-suspend-hibernate")
 
 # Colors
@@ -65,4 +64,4 @@ NC='\033[0m' # No Color
 # COMPRESSED OUTPUT
 echo -e "${B_CYAN}PERFORMANCE: Gov: $cpu_gov  APU: $apu_mode  Idle: $idle_drv${NC}"
 echo -e "${B_YELLOW}SCREEN:      Blank: $(format_time "$blank")  Sleep: $(format_time "$dpms_s")  Off: $(format_time "$dpms_o")${NC}"
-echo -e "${WHITE}SUSPEND:     Timeout: $(format_time "$inact")  Mode: $(format_sleep "$mode")  Lock: $(format_bool "$lock")${NC}"
+echo -e "${WHITE}SUSPEND:     Timeout: $(format_time "$inact")  Lock: $(format_bool "$lock")${NC}"
