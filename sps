@@ -1,5 +1,5 @@
 #!/bin/bash
-# Display XFCE power management settings
+# Display XFCE and Strix Halo hardware power settings
 # If a number is provided, set power settings first
 
 # If a parameter is given, call set-power-settings
@@ -14,6 +14,19 @@ if [ -n "$1" ]; then
 fi
 
 CONFIG_FILE="$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml"
+
+# STRIX HALO PERFORMANCE
+echo "                            STRIX HALO PERFORMANCE"
+cpu_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "n/a")
+apu_mode=$(cat /sys/class/ec_su_axb35/apu/power_mode 2>/dev/null || echo "n/a")
+idle_drv=$(cat /sys/devices/system/cpu/cpuidle/current_driver 2>/dev/null || echo "n/a")
+
+echo "  CPU Governor:        $cpu_gov"
+echo "  APU Power Mode:      $apu_mode"
+c1e=$(corefreq-cli -s 2>/dev/null | grep -oP 'C1E\s+<\K[^>]+' || echo "n/a")
+echo "  CPU Idle Driver:     $idle_drv"
+echo "  C1E (Enhanced Halt): $c1e"
+echo ""
 
 #echo "╔════════════════════════════════════════════════════════════╗"
 #echo "║         XFCE Power Management Settings                     ║"
