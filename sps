@@ -48,7 +48,6 @@ format_sleep() {
 
 # SCREEN Data
 blank=$(get_xf "blank-on-ac")
-dpms_e=$(get_xf "dpms-enabled")
 dpms_s=$(get_xf "dpms-on-ac-sleep")
 dpms_o=$(get_xf "dpms-on-ac-off")
 
@@ -65,5 +64,5 @@ NC='\033[0m' # No Color
 
 # COMPRESSED OUTPUT
 echo -e "${B_CYAN}PERFORMANCE: Gov: $cpu_gov  APU: $apu_mode  Idle: $idle_drv${NC}"
-echo -e "${B_YELLOW}SCREEN:      Blank: $(format_time "$blank")  DPMS: $(format_bool "$dpms_e")  Sleep: $(format_time "$dpms_s")  Off: $(format_time "$dpms_o")${NC}"
+echo -e "${B_YELLOW}SCREEN:      Blank: $(format_time "$blank")  Sleep: $(format_time "$dpms_s")  Off: $(format_time "$dpms_o")${NC}"
 echo -e "${WHITE}SUSPEND:     Timeout: $(format_time "$inact")  Mode: $(format_sleep "$mode")  Lock: $(format_bool "$lock")${NC}"
