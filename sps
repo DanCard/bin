@@ -56,9 +56,9 @@ inact=$(get_xf "inactivity-on-ac")
 lock=$(get_xf "lock-screen-suspend-hibernate")
 
 # Colors (TrueColor RGB)
-CYAN='\033[38;2;0;255;255m'
-YELLOW='\033[38;2;255;255;0m'
-WHITE='\033[38;2;255;255;255m'
+CYAN='\033[38;2;225;255;255m'
+YELLOW='\033[38;2;255;255;225m'
+WHITE='\033[38;2;255;225;255m'
 NC='\033[0m' # No Color
 
 # COMPRESSED OUTPUT
