@@ -1,11 +1,9 @@
 #!/bin/bash
-# Display XFCE and Strix Halo hardware power settings
-# If a number is provided, set power settings first
+# sps - Display XFCE and Strix Halo hardware power settings in a compact format
 
 # If a parameter is given, call set-power-settings
 if [ -n "$1" ]; then
     if [[ "$1" =~ ^[0-9]+$ ]]; then
-        # It's a number, call set-power-settings
         exec "$HOME/bin/set-power-settings" "$1"
     else
         echo "Error: Please provide a valid number"
@@ -13,64 +11,24 @@ if [ -n "$1" ]; then
     fi
 fi
 
-CONFIG_FILE="$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml"
-
-# STRIX HALO PERFORMANCE
-echo "                            STRIX HALO PERFORMANCE"
+# PERFORMANCE Data
 cpu_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "n/a")
 apu_mode=$(cat /sys/class/ec_su_axb35/apu/power_mode 2>/dev/null || echo "n/a")
 idle_drv=$(cat /sys/devices/system/cpu/cpuidle/current_driver 2>/dev/null || echo "n/a")
 
-echo "  CPU Governor:        $cpu_gov"
-echo "  APU Power Mode:      $apu_mode"
-c1e=$(corefreq-cli -s 2>/dev/null | grep -oP 'C1E\s+<\K[^>]+' || echo "n/a")
-echo "  CPU Idle Driver:     $idle_drv"
-echo "  C1E (Enhanced Halt): $c1e"
-echo ""
+# XFCE Data - Fetch once using xfconf-query
+XF_DATA=$(xfconf-query -c xfce4-power-manager -l -v 2>/dev/null)
 
-#echo "╔════════════════════════════════════════════════════════════╗"
-#echo "║         XFCE Power Management Settings                     ║"
-#echo "╚════════════════════════════════════════════════════════════╝"
-echo "				  Power Management Settings"
-#echo ""
-
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Error: Configuration file not found at $CONFIG_FILE"
-    exit 1
-fi
-
-# Function to get setting value from XML
-get_setting() {
-    local prop="$1"
-    local value=$(grep "name=\"$prop\"" "$CONFIG_FILE" | sed -n 's/.*value="\([^"]*\)".*/\1/p')
-    if [ -z "$value" ]; then
-        echo "Not set"
-    else
-        echo "$value"
-    fi
+get_xf() {
+    local val=$(echo "$XF_DATA" | grep "/xfce4-power-manager/$1 " | awk '{print $2}')
+    [ -z "$val" ] && echo "n/a" || echo "$val"
 }
 
-# Function to format time
 format_time() {
     local val="$1"
-    if [ "$val" = "Not set" ] || [ "$val" = "0" ]; then
-        echo "Never"
-    else
-        echo "${val} minutes"
-    fi
+    if [ "$val" = "n/a" ] || [ "$val" = "0" ]; then echo "Never"; else echo "${val}m"; fi
 }
 
-# Function to format sleep mode
-format_sleep_mode() {
-    case "$1" in
-        0) echo "Nothing" ;;
-        1) echo "Suspend" ;;
-        2) echo "Hibernate" ;;
-        *) echo "Unknown ($1)" ;;
-    esac
-}
-
-# Function to format boolean
 format_bool() {
     case "$1" in
         true) echo "Yes" ;;
@@ -79,31 +37,27 @@ format_bool() {
     esac
 }
 
-#echo "┌─ SCREEN SETTINGS ─────────────────────────────────────────┐"
-blank_ac=$(get_setting "blank-on-ac")
-dpms_enabled=$(get_setting "dpms-enabled")
-dpms_sleep=$(get_setting "dpms-on-ac-sleep")
-dpms_off=$(get_setting "dpms-on-ac-off")
+format_sleep() {
+    case "$1" in
+        0) echo "None" ;;
+        1) echo "Susp" ;;
+        2) echo "Hib" ;;
+        *) echo "n/a" ;;
+    esac
+}
 
-echo "  Screen blank:        $(format_time "$blank_ac")"
-echo "  DPMS enabled:        $(format_bool "$dpms_enabled")"
-echo "  DPMS sleep:          $(format_time "$dpms_sleep")"
-echo "  DPMS off:            $(format_time "$dpms_off")"
-#echo ""
+# SCREEN Data
+blank=$(get_xf "blank-on-ac")
+dpms_e=$(get_xf "dpms-enabled")
+dpms_s=$(get_xf "dpms-on-ac-sleep")
+dpms_o=$(get_xf "dpms-on-ac-off")
 
-#echo "┌─ SYSTEM SUSPEND ──────────────────────────────────────────┐"
-echo "				  SYSTEM SUSPEND"
-inactivity_ac=$(get_setting "inactivity-on-ac")
-sleep_mode_ac=$(get_setting "inactivity-sleep-mode-on-ac")
+# SUSPEND Data
+inact=$(get_xf "inactivity-on-ac")
+mode=$(get_xf "inactivity-sleep-mode-on-ac")
+lock=$(get_xf "lock-screen-suspend-hibernate")
 
-echo "  Inactivity timeout:  $(format_time "$inactivity_ac")"
-echo "  Sleep mode:          $(format_sleep_mode "$sleep_mode_ac")"
-#echo ""
-
-#echo "┌─ OTHER SETTINGS ──────────────────────────────────────────┐"
-#presentation_mode=$(get_setting "presentation-mode")
-lock_screen=$(get_setting "lock-screen-suspend-hibernate")
-
-#echo "  Presentation mode:   $(format_bool "$presentation_mode")"
-echo "  Lock on suspend:     $(format_bool "$lock_screen")"
-#echo ""
+# COMPRESSED OUTPUT
+echo "PERFORMANCE: Gov: $cpu_gov  APU: $apu_mode  Idle: $idle_drv"
+echo "SCREEN:      Blank: $(format_time "$blank")  DPMS: $(format_bool "$dpms_e")  Sleep: $(format_time "$dpms_s")  Off: $(format_time "$dpms_o")"
+echo "SUSPEND:     Timeout: $(format_time "$inact")  Mode: $(format_sleep "$mode")  Lock: $(format_bool "$lock")"
