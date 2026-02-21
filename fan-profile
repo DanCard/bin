@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# fan-profile
+# -----------
+# Purpose:
+#   Control AXB35 fan behavior with safe, explicit profiles.
+#
+# Why this exists:
+#   The EC driver controls fan "levels" (0..5), not exact RPM.
+#   Level transitions are temperature-based in curve mode.
+#   We use hysteresis (different ramp-up vs ramp-down thresholds) to reduce
+#   rapid on/off toggling near a single temperature boundary.
+#
+# Supported profiles:
+#   - auto   : vendor/firmware default behavior
+#   - smooth : custom curve that still allows fan-off, but reduces chatter
+#
+# Notes:
+#   - Writes under /sys/class/ec_su_axb35 usually require root.
+#   - This script prints verbose diagnostics by default.
+#   - Use --quiet to suppress most logs.
+
+CLASS_PATH="/sys/class/ec_su_axb35"
+FANS=(1 2 3)
+VERBOSE=1
+DEBUG_READS=0
+
+# "smooth" profile: allow fan-off when truly cool, but add hysteresis
+# around level 0/1 so fans don't chatter on/off near one threshold.
+CPU_RAMPUP="50,68,78,88,95"
+CPU_RAMPDOWN="43,62,74,84,92"
+SYS_RAMPUP="42,60,74,86,94"
+SYS_RAMPDOWN="36,54,68,82,90"
+
+log() {
+    local level="$1"
+    shift
+    if [[ "$VERBOSE" -eq 1 || "$level" == "ERROR" ]]; then
+        printf "[%s] %s\n" "$level" "$*" >&2
+    fi
+}
+
+ensure_driver_path() {
+    if [[ ! -d "$CLASS_PATH" ]]; then
+        log ERROR "Driver path missing: $CLASS_PATH"
+        log ERROR "Load module ec_su_axb35 first."
+        exit 1
+    fi
+}
+
+write_sysfs() {
+    local value="$1"
+    local path="$2"
+
+    log WRITE "Setting $path = $value"
+    if [[ -w "$path" ]]; then
+        printf "%s\n" "$value" > "$path"
+        log WRITE "Wrote directly to $path"
+        return
+    fi
+
+    if command -v sudo >/dev/null 2>&1; then
+        log STEP "Path not writable as current user, using sudo tee for $path"
+        printf "%s\n" "$value" | sudo tee "$path" >/dev/null
+        log WRITE "Wrote via sudo to $path"
+        return
+    fi
+
+    log ERROR "Cannot write $path (need root, and sudo not found)."
+    exit 1
+}
+
+read_sysfs() {
+    local path="$1"
+    local val
+    val="$(cat "$path" 2>/dev/null || echo "n/a")"
+    if [[ "$DEBUG_READS" -eq 1 ]]; then
+        log READ "$path => $val"
+    fi
+    printf "%s\n" "$val"
+}
+
+status() {
+    ensure_driver_path
+
+    local temp
+    temp="$(read_sysfs "$CLASS_PATH/temp1/temp")"
+    log INFO "Current EC-reported CPU temp: ${temp}C"
+    echo "Temp: ${temp}C"
+    echo
+    printf "%-3s | %-6s | %-5s | %-6s | %-15s | %-15s\n" "Fan" "Mode" "Level" "RPM" "RampUp" "RampDown"
+    printf -- "----+--------+-------+--------+-----------------+-----------------\n"
+    for i in "${FANS[@]}"; do
+        local f_mode f_level f_rpm f_up f_down
+        f_mode="$(read_sysfs "$CLASS_PATH/fan$i/mode")"
+        f_rpm="$(read_sysfs "$CLASS_PATH/fan$i/rpm")"
+        if [[ "$f_mode" != "auto" ]]; then
+            f_level="$(read_sysfs "$CLASS_PATH/fan$i/level")"
+            f_up="$(read_sysfs "$CLASS_PATH/fan$i/rampup_curve")"
+            f_down="$(read_sysfs "$CLASS_PATH/fan$i/rampdown_curve")"
+        else
+            f_level="-"
+            f_up="-"
+            f_down="-"
+        fi
+
+        printf "%-3s | %-6s | %-5s | %-6s | %-15s | %-15s\n" \
+            "$i" "$f_mode" "$f_level" "$f_rpm" "$f_up" "$f_down"
+    done
+    echo
+    cat <<'EOF'
+Legend:
+  Level = EC step (0..5), not exact RPM target
+  0=off, 1=very low, 2=low, 3=medium, 4=high, 5=max
+  TempSrc=temp1 means all fans share the same EC temp source in curve mode
+
+Typical RPM on your host from calibration:
+  CPU fans (fan1/fan2): L1~1480, L2~2580, L3~3420, L4~4100, L5~4720
+  System fan (fan3):    L1~580,  L2~1310, L3~1890, L4~2250, L5~2420
+EOF
+}
+
+set_auto() {
+    log STEP "Applying AUTO profile to all fans"
+    for i in "${FANS[@]}"; do
+        log INFO "Fan$i -> mode=auto"
+        write_sysfs "auto" "$CLASS_PATH/fan$i/mode"
+    done
+    log INFO "AUTO profile applied"
+}
+
+set_smooth_curve() {
+    log STEP "Applying SMOOTH profile (curve mode with hysteresis)"
+    log INFO "Fan1/Fan2 CPU curves: up=$CPU_RAMPUP down=$CPU_RAMPDOWN"
+    log INFO "Fan3 system curves:   up=$SYS_RAMPUP down=$SYS_RAMPDOWN"
+
+    # Fan1/Fan2 are CPU fans, Fan3 is system fan.
+    write_sysfs "$CPU_RAMPUP" "$CLASS_PATH/fan1/rampup_curve"
+    write_sysfs "$CPU_RAMPDOWN" "$CLASS_PATH/fan1/rampdown_curve"
+    write_sysfs "$CPU_RAMPUP" "$CLASS_PATH/fan2/rampup_curve"
+    write_sysfs "$CPU_RAMPDOWN" "$CLASS_PATH/fan2/rampdown_curve"
+    write_sysfs "$SYS_RAMPUP" "$CLASS_PATH/fan3/rampup_curve"
+    write_sysfs "$SYS_RAMPDOWN" "$CLASS_PATH/fan3/rampdown_curve"
+
+    for i in "${FANS[@]}"; do
+        log INFO "Fan$i -> mode=curve"
+        write_sysfs "curve" "$CLASS_PATH/fan$i/mode"
+    done
+    log INFO "SMOOTH profile applied"
+}
+
+explain_smooth() {
+    cat <<EOF
+Smooth profile behavior (hysteresis):
+
+CPU fans (fan1/fan2):
+  Ramp up thresholds:   $CPU_RAMPUP
+  Ramp down thresholds: $CPU_RAMPDOWN
+  Meaning:
+    - turn on level 1 at >= 50C
+    - turn off from level 1 at <= 43C
+    - the 50/43 gap reduces on/off chatter
+
+System fan (fan3):
+  Ramp up thresholds:   $SYS_RAMPUP
+  Ramp down thresholds: $SYS_RAMPDOWN
+  Meaning:
+    - turn on level 1 at >= 42C
+    - turn off from level 1 at <= 36C
+    - the 42/36 gap reduces on/off chatter
+EOF
+}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  fan-profile [--verbose|--quiet] [--debug-reads] status
+  fan-profile [--verbose|--quiet] [--debug-reads] auto
+  fan-profile [--verbose|--quiet] [--debug-reads] smooth
+  fan-profile [--verbose|--quiet] [--debug-reads] explain
+
+Profiles:
+  auto    - firmware/EC default behavior
+  smooth  - curve mode with hysteresis to reduce on/off toggling (still allows 0 RPM)
+
+Options:
+  --verbose   print operational logs (default)
+  --quiet     show only primary output
+  --debug-reads  include low-level [READ] path/value traces
+EOF
+}
+
+main() {
+    local cmd=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --verbose|-v)
+                VERBOSE=1
+                shift
+                ;;
+            --quiet|-q)
+                VERBOSE=0
+                shift
+                ;;
+            --debug-reads|--debug)
+                DEBUG_READS=1
+                shift
+                ;;
+            *)
+                cmd="$1"
+                shift
+                break
+                ;;
+        esac
+    done
+
+    ensure_driver_path
+
+    cmd="${cmd:-status}"
+    log INFO "fan-profile start: cmd=$cmd class_path=$CLASS_PATH"
+    case "$cmd" in
+        status)
+            status
+            ;;
+        auto)
+            set_auto
+            status
+            ;;
+        smooth)
+            set_smooth_curve
+            status
+            ;;
+        explain)
+            explain_smooth
+            ;;
+        -h|--help|help)
+            usage
+            ;;
+        *)
+            log ERROR "Unknown command: $cmd"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

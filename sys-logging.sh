@@ -44,12 +44,32 @@ format_temp_c() {
 }
 
 get_fan_summary() {
-    local f1 f2 f3 path="/sys/class/ec_su_axb35"
+    local f1 f2 f3 m1 m2 m3 l1 l2 l3 path="/sys/class/ec_su_axb35"
+    local s1 s2 s3
+    local d1="a0" d2="a3" d3="a3"
+    local o1 o2 o3
     if [ -d "$path" ]; then
         f1=$(cat "$path/fan1/rpm" 2>/dev/null || echo "0")
         f2=$(cat "$path/fan2/rpm" 2>/dev/null || echo "0")
         f3=$(cat "$path/fan3/rpm" 2>/dev/null || echo "0")
-        printf "%4s %4s %4s" "$f1" "$f2" "$f3"
+        m1=$(cat "$path/fan1/mode" 2>/dev/null || echo "?")
+        m2=$(cat "$path/fan2/mode" 2>/dev/null || echo "?")
+        m3=$(cat "$path/fan3/mode" 2>/dev/null || echo "?")
+        l1=$(cat "$path/fan1/level" 2>/dev/null || echo "?")
+        l2=$(cat "$path/fan2/level" 2>/dev/null || echo "?")
+        l3=$(cat "$path/fan3/level" 2>/dev/null || echo "?")
+
+        s1="${m1:0:1}${l1}"
+        s2="${m2:0:1}${l2}"
+        s3="${m3:0:1}${l3}"
+        
+        # Hide common default states to reduce noise:
+        # fan1=a0, fan2=a3, fan3=a3. Show suffix only when unusual.
+        if [[ "$s1" == "$d1" ]]; then o1="$f1"; else o1="$f1:$s1"; fi
+        if [[ "$s2" == "$d2" ]]; then o2="$f2"; else o2="$f2:$s2"; fi
+        if [[ "$s3" == "$d3" ]]; then o3="$f3"; else o3="$f3:$s3"; fi
+
+        printf "%6s %6s %6s" "$o1" "$o2" "$o3"
     else
         printf "F: n/a"
     fi
@@ -103,7 +123,30 @@ get_temp_summary() {
         return
     fi
 
-    sorted=$(printf "%s" "$collected" | sort -t'|' -k1,1nr | head -n "$TEMP_N")
+    # Always place acpitz first (if available), then fill remaining slots
+    # with hottest non-acpitz sensors.
+    local acpi_first non_acpi_sorted remain
+    acpi_first=$(printf "%s\n" "$collected" \
+        | awk -F'|' '$2 ~ /^acpitz(\/|$)/' \
+        | sort -t'|' -k1,1nr \
+        | head -n 1)
+
+    if [[ -n "$acpi_first" ]]; then
+        remain=$((TEMP_N - 1))
+        non_acpi_sorted=$(printf "%s\n" "$collected" \
+            | awk -F'|' '$2 !~ /^acpitz(\/|$)/' \
+            | sort -t'|' -k1,1nr \
+            | head -n "$remain")
+        sorted=$(
+            {
+                printf "%s\n" "$acpi_first"
+                printf "%s\n" "$non_acpi_sorted"
+            } | sed '/^$/d'
+        )
+    else
+        sorted=$(printf "%s" "$collected" | sort -t'|' -k1,1nr | head -n "$TEMP_N")
+    fi
+
     while IFS='|' read -r mc sensor; do
         [[ -z "$mc" ]] && continue
         local t_fmt
