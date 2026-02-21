@@ -28,8 +28,8 @@ DEBUG_READS=0
 
 # "smooth" profile: allow fan-off when truly cool, but add hysteresis
 # around level 0/1 so fans don't chatter on/off near one threshold.
-CPU_RAMPUP="45,65,78,88,95"
-CPU_RAMPDOWN="38,55,72,84,92"
+CPU_RAMPUP="40,60,74,86,94"
+CPU_RAMPDOWN="33,50,68,82,90"
 SYS_RAMPUP="40,60,74,86,94"
 SYS_RAMPDOWN="33,50,68,82,90"
 
@@ -154,21 +154,13 @@ explain_smooth() {
     cat <<EOF
 Smooth profile behavior (hysteresis):
 
-CPU fans (fan1/fan2):
+All fans (fan1/fan2/fan3) now use a unified curve:
   Ramp up thresholds:   $CPU_RAMPUP
   Ramp down thresholds: $CPU_RAMPDOWN
   Meaning:
-    - turn on level 1 at >= 50C
-    - turn off from level 1 at <= 43C
-    - the 50/43 gap reduces on/off chatter
-
-System fan (fan3):
-  Ramp up thresholds:   $SYS_RAMPUP
-  Ramp down thresholds: $SYS_RAMPDOWN
-  Meaning:
-    - turn on level 1 at >= 42C
-    - turn off from level 1 at <= 36C
-    - the 42/36 gap reduces on/off chatter
+    - turn on level 1 at >= ${CPU_RAMPUP%%,*}C
+    - turn off from level 1 at <= ${CPU_RAMPDOWN%%,*}C
+    - the ${CPU_RAMPUP%%,*}C/${CPU_RAMPDOWN%%,*}C gap reduces on/off chatter
 EOF
 }
 

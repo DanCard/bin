@@ -137,31 +137,19 @@ do_curve() {
     done
     log ""
 
-    # Fan 1 & 2 (CPU): level 1 (~1482 RPM) at 45°C, off below 38°C
-    log "--- Configuring fan1 & fan2 (CPU fans) ---"
-    log "  Curve: off → 1482RPM@45°C → 2557RPM@65°C → 3374RPM@78°C → 4030RPM@88°C → 4647RPM@95°C"
-    log "  Hysteresis: rampdown 7°C below rampup for level 1, 6°C-10°C for higher levels"
-    for fan in fan1 fan2; do
-        log "$fan: writing rampup_curve=45,65,78,88,95"
-        echo "45,65,78,88,95" | sudo tee "$SYSFS/$fan/rampup_curve" > /dev/null
-        log "$fan: writing rampdown_curve=38,55,72,84,92"
-        echo "38,55,72,84,92" | sudo tee "$SYSFS/$fan/rampdown_curve" > /dev/null
+    # All fans (CPU & System): unified level 1 (~1482 RPM) at 40°C, off below 33°C
+    log "--- Configuring unified fan curves for all fans (1, 2, & 3) ---"
+    log "  Curve: off → on@40°C → 60°C → 74°C → 86°C → 94°C"
+    log "  Hysteresis: rampdown 7°C below rampup for level 1, 4°C-10°C for higher levels"
+    for fan in fan1 fan2 fan3; do
+        log "$fan: writing rampup_curve=40,60,74,86,94"
+        echo "40,60,74,86,94" | sudo tee "$SYSFS/$fan/rampup_curve" > /dev/null
+        log "$fan: writing rampdown_curve=33,50,68,82,90"
+        echo "33,50,68,82,90" | sudo tee "$SYSFS/$fan/rampdown_curve" > /dev/null
         log "$fan: setting mode to curve"
         echo curve | sudo tee "$SYSFS/$fan/mode" > /dev/null
         log "$fan: mode is now $(cat "$SYSFS/$fan/mode"), level=$(cat "$SYSFS/$fan/level"), rpm=$(cat "$SYSFS/$fan/rpm") RPM"
     done
-    log ""
-
-    # Fan 3 (system): level 1 at 40°C, off below 33°C
-    log "--- Configuring fan3 (system fan) ---"
-    log "  Curve: off → on@40°C → 60°C → 74°C → 86°C → 94°C"
-    log "$fan: writing rampup_curve=40,60,74,86,94"
-    echo "40,60,74,86,94" | sudo tee "$SYSFS/fan3/rampup_curve" > /dev/null
-    log "fan3: writing rampdown_curve=33,50,68,82,90"
-    echo "33,50,68,82,90" | sudo tee "$SYSFS/fan3/rampdown_curve" > /dev/null
-    log "fan3: setting mode to curve"
-    echo curve | sudo tee "$SYSFS/fan3/mode" > /dev/null
-    log "fan3: mode is now $(cat "$SYSFS/fan3/mode"), level=$(cat "$SYSFS/fan3/level"), rpm=$(cat "$SYSFS/fan3/rpm") RPM"
     log ""
 
     # Show after state
