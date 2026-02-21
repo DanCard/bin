@@ -28,10 +28,10 @@ DEBUG_READS=0
 
 # "smooth" profile: allow fan-off when truly cool, but add hysteresis
 # around level 0/1 so fans don't chatter on/off near one threshold.
-CPU_RAMPUP="50,68,78,88,95"
-CPU_RAMPDOWN="43,62,74,84,92"
-SYS_RAMPUP="42,60,74,86,94"
-SYS_RAMPDOWN="36,54,68,82,90"
+CPU_RAMPUP="45,65,78,88,95"
+CPU_RAMPDOWN="38,55,72,84,92"
+SYS_RAMPUP="40,60,74,86,94"
+SYS_RAMPDOWN="33,50,68,82,90"
 
 log() {
     local level="$1"
