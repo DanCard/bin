@@ -29,6 +29,18 @@
 #
 # REQUIRES: PipeWire, PulseAudio compatibility layer, ffmpeg
 #   Signal must be in an active call (ringrtc node must exist)
+#
+# VERSION HISTORY:
+#   v1.0  2025-01-xx  Initial version - basic virtual sink + amix recording
+#   v1.1  2025-01-xx  Added echo cancellation module (echocancel_source)
+#   v1.2  2025-01-xx  Added loopback so user can still hear the call through speakers
+#   v1.3  2025-02-xx  Attempted amix volume fix (still ~35 dB too quiet)
+#   v1.4  2026-02-21  Fix audio level: recordings were ~35 dB quieter than record-call.sh
+#                     - Added volume boost on inputs (+6dB signal, +3dB mic)
+#                     - Set amix weights=1 1, normalize=0 to stop 1/N attenuation
+#                     - Added dynaudnorm for consistent output levels
+#                     - Set explicit sample_rate 48000 on pulse inputs
+#                     Target: mean volume -25 to -30 dB (was -62 dB)
 
 # --- Hardware-specific device names (from `pactl list short sinks/sources`) ---
 SPEAKER="alsa_output.pci-0000_c6_00.6.analog-stereo"          # Built-in speakers
@@ -162,17 +174,21 @@ echo "------------------------------------------------"
 #   -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest"
 #       [0:a]     = first input (Signal audio)
 #       [1:a]     = second input (mic audio)
+#       volume=6dB/3dB = boost signal & mic to compensate for virtual sink levels
 #       amix      = mix both streams into one
 #       inputs=2  = two input streams
+#       weights=1 1, normalize=0 = prevent amix from halving volume (default 1/N)
 #       duration=longest = keep recording until the longer stream ends
+#       dynaudnorm = dynamic audio normalization for consistent levels
 #   -c:a aac      = encode as AAC audio codec
 #   -b:a 192k     = 192 kbps bitrate (good quality for voice)
 #   -ac 2         = stereo output
 #   -t 02:30:00   = max recording length 2.5 hours (safety limit)
 ffmpeg -stats -y \
-  -f pulse -i "${VIRTUAL_SINK}.monitor" \
-  -f pulse -i "echocancel_source" \
-  -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest" \
+  -f pulse -sample_rate 48000 -i "${VIRTUAL_SINK}.monitor" \
+  -f pulse -sample_rate 48000 -i "echocancel_source" \
+  -filter_complex "[0:a]volume=6dB[signal];[1:a]volume=3dB[mic];[signal][mic]amix=inputs=2:duration=longest:weights=1 1:normalize=0,dynaudnorm=p=0.95:m=10:s=5[out]" \
+  -map "[out]" \
   -c:a aac -b:a 192k \
   -ac 2 \
   -t 02:30:00 \

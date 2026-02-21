@@ -142,6 +142,24 @@ def generate_summary(transcript_path, output_path, max_tokens, url):
         print("\n" + "-" * 40)
         print(f"✅ Summary saved to: {output_path}")
 
+        # --- NEW: Create Google Doc ---
+        print(f"📁 Creating Google Doc in defensetech account...")
+        try:
+            # 1. Switch auth to defensetech
+            switch_cmd = os.path.expanduser("~/.gemini/switch_auth.sh defensetech")
+            subprocess.run(switch_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            # 2. Use gemini CLI to create the doc from the file
+            # We pass the absolute path to make it easier for the CLI
+            abs_output_path = os.path.abspath(output_path)
+            gemini_cmd = f"gemini \"Create a Google Doc from the markdown file '{abs_output_path}' using its content. The title should be based on the meeting title in the file.\""
+            
+            # We run this and show output to the user so they can see progress
+            subprocess.run(gemini_cmd, shell=True, check=True)
+            print(f"✅ Google Doc creation request sent.")
+        except subprocess.CalledProcessError as e:
+            print(f"⚠️ Warning: Could not create Google Doc automatically: {e}")
+
     except requests.exceptions.RequestException as e:
         print(f"\n❌ Error calling llama-server: {e}")
 
