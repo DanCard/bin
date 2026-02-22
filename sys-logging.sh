@@ -15,7 +15,7 @@
 # - F1, F2, F3            = AXB35 System Fans 1, 2, 3
 
 LOG_DIR="$HOME/misc/logs"
-INTERVAL=20
+INTERVAL=30
 TOP_N=3
 TEMP_N=5
 TEMP_DECIMALS=0

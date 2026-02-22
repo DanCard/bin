@@ -49,7 +49,7 @@ SIGNAL_NODE="ringrtc"       # Signal's WebRTC audio output node name in PipeWire
 VIRTUAL_SINK="signal_sink"  # Name for the virtual sink we create
 
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-NAME=${1:-call}
+NAME=${1:-signal-call}
 OUTFILE="${NAME}-${TIMESTAMP}.m4a"
 
 # Track what we set up so cleanup only undoes what we did
@@ -187,7 +187,7 @@ echo "------------------------------------------------"
 ffmpeg -stats -y \
   -f pulse -sample_rate 48000 -i "${VIRTUAL_SINK}.monitor" \
   -f pulse -sample_rate 48000 -i "echocancel_source" \
-  -filter_complex "[0:a]volume=6dB[signal];[1:a]volume=3dB[mic];[signal][mic]amix=inputs=2:duration=longest:weights=1 1:normalize=0,dynaudnorm=p=0.95:m=10:s=5[out]" \
+  -filter_complex "[0:a]pan=mono|c0=c0,volume=6dB[signal];[1:a]pan=mono|c0=c0,volume=3dB[mic];[signal][mic]amix=inputs=2:duration=longest:weights=1 1:normalize=0,dynaudnorm=p=0.95:m=10:s=5,pan=stereo|c0=c0|c1=c0[out]" \
   -map "[out]" \
   -c:a aac -b:a 192k \
   -ac 2 \
