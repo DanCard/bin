@@ -17,3 +17,5 @@ __pycache__/
 
 # audio files
 *.m4a
+
+old/
