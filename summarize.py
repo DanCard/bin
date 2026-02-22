@@ -15,14 +15,14 @@ LLAMA_URL = "http://localhost:8080"
 DEFAULT_MAX_TOKENS = -1
 
 SYSTEM_PROMPT = (
-    "You are a meeting notes assistant. Produce detailed, thorough meeting notes — not a concise summary. "
+    "You are a strategic meeting analyst. Produce an exhaustive report of the meeting."
     "Include all topics discussed, decisions made, action items, who said what, and any context or nuance mentioned. "
     "Use markdown formatting with headers and bullet points. Include quotes and excerpts."
 )
 
 USER_PROMPT_PREFIX = (
     "Here is the full transcript of a meeting. Write detailed meeting notes covering every topic, "
-    "decision, action item, and important details discussed. Include interesting quotes and key excerpts."
+    "decisions, action items, and details discussed. Include quotes and excerpts."
 )
 
 def is_server_running(url):

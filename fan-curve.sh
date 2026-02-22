@@ -10,12 +10,25 @@ usage() {
     echo "  (no args)  Set curve mode with optimized thresholds"
     echo "  --reset    Restore auto mode on all fans"
     echo "  --status   Show current fan state"
-    echo "  --probe    Probe unknown EC codes on fan1 (requires fixed mode)"
+    echo "  --probe    Probe EC codes on all fans"
     exit 0
 }
 
 log() {
     echo "$*"
+}
+
+set_sysfs() {
+    local path="$1" val="$2"
+    echo "$val" | sudo tee "$SYSFS/$path" > /dev/null
+}
+
+get_rpms() {
+    local out=""
+    for fan in $FANS; do
+        out+="${fan}=$(cat "$SYSFS/$fan/rpm") "
+    done
+    echo "$out"
 }
 
 do_status() {
@@ -49,111 +62,59 @@ do_status() {
 do_reset() {
     log "=== Resetting all fans to auto mode ==="
     for fan in $FANS; do
-        local old_mode
-        old_mode=$(cat "$SYSFS/$fan/mode")
-        log "$fan: current mode=$old_mode, switching to auto..."
-        echo auto | sudo tee "$SYSFS/$fan/mode" > /dev/null
-        local new_mode
-        new_mode=$(cat "$SYSFS/$fan/mode")
-        log "$fan: mode is now $new_mode"
+        log "$fan: mode $(cat "$SYSFS/$fan/mode") -> auto"
+        set_sysfs "$fan/mode" auto
     done
-    log "=== All fans restored to auto mode ==="
 }
 
 do_probe() {
-    log "=== Probing all EC codes (0-15) on fan1 ==="
-    log "Setting fan1 to fixed mode..."
-    echo fixed | sudo tee "$SYSFS/fan1/mode" > /dev/null
+    local target="$1" val=2
+
+    log "=== Probing $target (reporting all fans) ==="
+    set_sysfs "$target/mode" fixed
     sleep 1
 
-    local mode
-    mode=$(cat "$SYSFS/fan1/mode")
-    if [ "$mode" != "fixed" ]; then
-        log "ERROR: fan1 mode is '$mode', expected 'fixed'. Aborting."
-        return 1
-    fi
-    log "fan1 confirmed in fixed mode"
+    [[ $(cat "$SYSFS/$target/mode") == "fixed" ]] || { log "ERROR: $target not in fixed mode"; return 1; }
 
-    log "Setting fan1 to off (raw_level=8) as baseline..."
-    echo 8 | sudo tee "$SYSFS/fan1/raw_level" > /dev/null
-    log "Waiting 5s for fan to stop..."
-    sleep 5
-    log "Baseline RPM: $(cat "$SYSFS/fan1/rpm")"
+    log "Baseline (off, waiting 5s): $(set_sysfs "$target/raw_level" 8; sleep 5; get_rpms)"
 
     log ""
-    log "Starting probe: 16 values × 11s each ≈ 3 minutes"
-    log "Each test: off(3s) → set value → wait(8s) → read RPM"
+    log "Starting sequence: off(3s) → set value → report at +5s, +7s, +9s"
     log "----------------------------------------------"
+    set_sysfs "$target/raw_level" 8; sleep 3
+    
+    log "[$val] Setting raw_level=$val (0x02)..."
+    set_sysfs "$target/raw_level" "$val"
 
-    for val in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-        # Set to off first to get a clean spin-up
-        echo 8 | sudo tee "$SYSFS/fan1/raw_level" > /dev/null
-        log "[$val/15] Reset to off, waiting 3s..."
-        sleep 3
-
-        # Now set the test value and wait for spin-up
-        printf -v hex "0x%02X" "$val"
-        log "[$val/15] Setting raw_level=$val ($hex), waiting 8s for spin-up..."
-        echo "$val" | sudo tee "$SYSFS/fan1/raw_level" > /dev/null
-        sleep 8
-
-        # Verify still in fixed mode
-        mode=$(cat "$SYSFS/fan1/mode")
-        if [ "$mode" != "fixed" ]; then
-            log "[$val/15] WARNING: mode changed to '$mode'! Re-setting fixed."
-            echo fixed | sudo tee "$SYSFS/fan1/mode" > /dev/null
-            sleep 1
-        fi
-
-        local rpm raw
-        rpm=$(cat "$SYSFS/fan1/rpm")
-        raw=$(cat "$SYSFS/fan1/raw_level")
-        log "[$val/15] RESULT: raw=$val ($hex)  readback=$raw  mode=$mode  rpm=${rpm} RPM"
+    local elapsed=0
+    for delay in 5 2 2; do
+        sleep "$delay"
+        elapsed=$((elapsed + delay))
+        
+        # Verify fixed mode at each step
+        [[ $(cat "$SYSFS/$target/mode") == "fixed" ]] || set_sysfs "$target/mode" fixed
+        
+        log "[$val] RESULT (+${elapsed}s): $(get_rpms) RPM"
     done
 
     log "----------------------------------------------"
-    log "Probe complete. Restoring fan1 to auto mode..."
-    echo auto | sudo tee "$SYSFS/fan1/mode" > /dev/null
-    log "fan1 mode is now $(cat "$SYSFS/fan1/mode")"
+    log "Restoring $target to auto mode..."
+    set_sysfs "$target/mode" auto
 }
 
 do_curve() {
     log "=== Setting optimized fan curves ==="
-    local temp
-    temp=$(cat "$SYSFS/temp1/temp")
-    log "Current temperature: ${temp}°C"
+    log "Temperature: $(cat "$SYSFS/temp1/temp")°C"
     log ""
 
-    # Show before state
-    log "--- Before ---"
+    # Config for all fans: off below 27°C, unified curve starting at 40°C
     for fan in $FANS; do
-        local mode level rpm
-        mode=$(cat "$SYSFS/$fan/mode")
-        level=$(cat "$SYSFS/$fan/level")
-        rpm=$(cat "$SYSFS/$fan/rpm")
-        log "$fan: mode=$mode  level=$level  rpm=${rpm} RPM"
-        log "  rampup:   $(cat "$SYSFS/$fan/rampup_curve")"
-        log "  rampdown: $(cat "$SYSFS/$fan/rampdown_curve")"
+        log "$fan: configuring curve..."
+        set_sysfs "$fan/rampup_curve" "40,60,74,86,94"
+        set_sysfs "$fan/rampdown_curve" "27,44,62,76,84"
+        set_sysfs "$fan/mode" curve
     done
     log ""
-
-    # All fans (CPU & System): unified level 1 (~1482 RPM) at 40°C, off below 33°C
-    log "--- Configuring unified fan curves for all fans (1, 2, & 3) ---"
-    log "  Curve: off → on@40°C → 60°C → 74°C → 86°C → 94°C"
-    log "  Hysteresis: rampdown 7°C below rampup for level 1, 4°C-10°C for higher levels"
-    for fan in fan1 fan2 fan3; do
-        log "$fan: writing rampup_curve=40,60,74,86,94"
-        echo "40,60,74,86,94" | sudo tee "$SYSFS/$fan/rampup_curve" > /dev/null
-        log "$fan: writing rampdown_curve=33,50,68,82,90"
-        echo "33,50,68,82,90" | sudo tee "$SYSFS/$fan/rampdown_curve" > /dev/null
-        log "$fan: setting mode to curve"
-        echo curve | sudo tee "$SYSFS/$fan/mode" > /dev/null
-        log "$fan: mode is now $(cat "$SYSFS/$fan/mode"), level=$(cat "$SYSFS/$fan/level"), rpm=$(cat "$SYSFS/$fan/rpm") RPM"
-    done
-    log ""
-
-    # Show after state
-    log "--- After ---"
     do_status
 }
 
@@ -161,7 +122,11 @@ case "${1:-}" in
     --help|-h) usage ;;
     --reset)   do_reset ;;
     --status)  do_status ;;
-    --probe)   do_probe ;;
+    --probe)
+        for fan in $FANS; do
+            do_probe "$fan"
+        done
+        ;;
     "")        do_curve ;;
     *)         echo "Unknown option: $1"; usage ;;
 esac

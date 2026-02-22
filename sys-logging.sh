@@ -15,7 +15,7 @@
 # - F1, F2, F3            = AXB35 System Fans 1, 2, 3
 
 LOG_DIR="$HOME/misc/logs"
-INTERVAL=30
+INTERVAL=20
 TOP_N=3
 TEMP_N=5
 TEMP_DECIMALS=0
@@ -45,9 +45,7 @@ format_temp_c() {
 
 get_fan_summary() {
     local f1 f2 f3 m1 m2 m3 l1 l2 l3 path="/sys/class/ec_su_axb35"
-    local s1 s2 s3
-    local d1="a0" d2="a3" d3="a3"
-    local o1 o2 o3
+    local s1 s2 s3 o1 o2 o3
     if [ -d "$path" ]; then
         f1=$(cat "$path/fan1/rpm" 2>/dev/null || echo "0")
         f2=$(cat "$path/fan2/rpm" 2>/dev/null || echo "0")
@@ -63,11 +61,10 @@ get_fan_summary() {
         s2="${m2:0:1}${l2}"
         s3="${m3:0:1}${l3}"
         
-        # Hide common default states to reduce noise:
-        # fan1=a0, fan2=a3, fan3=a3. Show suffix only when unusual.
-        if [[ "$s1" == "$d1" ]]; then o1="$f1"; else o1="$f1:$s1"; fi
-        if [[ "$s2" == "$d2" ]]; then o2="$f2"; else o2="$f2:$s2"; fi
-        if [[ "$s3" == "$d3" ]]; then o3="$f3"; else o3="$f3:$s3"; fi
+        # Show suffix except for 'a0' (auto mode, level 0)
+        if [[ "$s1" == "a0" ]]; then o1="$f1"; else o1="$f1:$s1"; fi
+        if [[ "$s2" == "a0" ]]; then o2="$f2"; else o2="$f2:$s2"; fi
+        if [[ "$s3" == "a0" ]]; then o3="$f3"; else o3="$f3:$s3"; fi
 
         printf "%6s %6s %6s" "$o1" "$o2" "$o3"
     else
