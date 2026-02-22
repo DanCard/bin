@@ -23,6 +23,13 @@ set_sysfs() {
     echo "$val" | sudo tee "$SYSFS/$path" > /dev/null
 }
 
+set_all() {
+    local attr="$1" val="$2"
+    for fan in $FANS; do
+        set_sysfs "$fan/$attr" "$val"
+    done
+}
+
 get_rpms() {
     local out=""
     for fan in $FANS; do
@@ -61,45 +68,66 @@ do_status() {
 
 do_reset() {
     log "=== Resetting all fans to auto mode ==="
-    for fan in $FANS; do
-        log "$fan: mode $(cat "$SYSFS/$fan/mode") -> auto"
-        set_sysfs "$fan/mode" auto
-    done
+    set_all mode auto
+    log "=== All fans restored to auto mode ==="
 }
 
 do_probe() {
-    local target="$1" val=2
+    log "=== Probing fans individually ==="
+    log "Initial: $(get_rpms)"
 
-    log "=== Probing $target (reporting all fans) ==="
-    set_sysfs "$target/mode" fixed
-    sleep 1
+    for active in $FANS; do
+        log ""
+        log "--- Probing $active (others untouched) ---"
+        log "[$active] before: $(get_rpms)"
+        sleep 1
+        set_sysfs "$active/mode" fixed
+        set_sysfs "$active/raw_level" 8
+        sleep 1
+        log "[$active] off: $(get_rpms)"
 
-    [[ $(cat "$SYSFS/$target/mode") == "fixed" ]] || { log "ERROR: $target not in fixed mode"; return 1; }
+        log "[$active] Setting raw_level=2..."
+        set_sysfs "$active/raw_level" 2
 
-    log "Baseline (off, waiting 5s): $(set_sysfs "$target/raw_level" 8; sleep 5; get_rpms)"
+        local elapsed=0
+        for delay in 3 1 1; do
+            sleep "$delay"
+            elapsed=$((elapsed + delay))
+            log "[$active] +${elapsed}s: $(get_rpms)"
+        done
 
-    log ""
-    log "Starting sequence: off(3s) → set value → report at +5s, +7s, +9s"
-    log "----------------------------------------------"
-    set_sysfs "$target/raw_level" 8; sleep 3
-    
-    log "[$val] Setting raw_level=$val (0x02)..."
-    set_sysfs "$target/raw_level" "$val"
-
-    local elapsed=0
-    for delay in 5 2 2; do
-        sleep "$delay"
-        elapsed=$((elapsed + delay))
-        
-        # Verify fixed mode at each step
-        [[ $(cat "$SYSFS/$target/mode") == "fixed" ]] || set_sysfs "$target/mode" fixed
-        
-        log "[$val] RESULT (+${elapsed}s): $(get_rpms) RPM"
+        log "[$active] Restoring auto mode..."
+        set_sysfs "$active/mode" auto
+        sleep 1
+        log "[$active] restored: $(get_rpms)"
     done
 
-    log "----------------------------------------------"
-    log "Restoring $target to auto mode..."
-    set_sysfs "$target/mode" auto
+    log ""
+    log "--- Probing all fans together ---"
+    log "[all] before: $(get_rpms)"
+    sleep 1
+    set_all mode fixed
+    set_all raw_level 8
+    sleep 1
+    log "[all] off: $(get_rpms)"
+
+    log "[all] Setting raw_level=2..."
+    set_all raw_level 2
+
+    local elapsed=0
+    for delay in 3 1 1; do
+        sleep "$delay"
+        elapsed=$((elapsed + delay))
+        log "[all] +${elapsed}s: $(get_rpms)"
+    done
+
+    log "[all] Restoring auto mode..."
+    set_all mode auto
+    sleep 1
+    log "[all] restored: $(get_rpms)"
+
+    log ""
+    log "Probe complete."
 }
 
 do_curve() {
@@ -108,12 +136,11 @@ do_curve() {
     log ""
 
     # Config for all fans: off below 27°C, unified curve starting at 40°C
-    for fan in $FANS; do
-        log "$fan: configuring curve..."
-        set_sysfs "$fan/rampup_curve" "40,60,74,86,94"
-        set_sysfs "$fan/rampdown_curve" "27,44,62,76,84"
-        set_sysfs "$fan/mode" curve
-    done
+    log "Configuring unified curve for all fans..."
+    set_all rampup_curve "40,60,74,86,94"
+    set_all rampdown_curve "27,44,62,76,84"
+    set_all mode curve
+
     log ""
     do_status
 }
@@ -122,11 +149,7 @@ case "${1:-}" in
     --help|-h) usage ;;
     --reset)   do_reset ;;
     --status)  do_status ;;
-    --probe)
-        for fan in $FANS; do
-            do_probe "$fan"
-        done
-        ;;
+    --probe)   do_probe ;;
     "")        do_curve ;;
     *)         echo "Unknown option: $1"; usage ;;
 esac
