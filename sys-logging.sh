@@ -24,6 +24,7 @@ PROC_NAME_WIDTH=15
 COMM_WIDTH=15
 LOG_RETENTION_DAYS=180
 LOG_PREFIX="sys-logging"
+EC_PATH="/sys/class/ec_su_axb35"
 
 mkdir -p "$LOG_DIR"
 
@@ -32,6 +33,20 @@ log_msg() {
 }
 
 trap 'log_msg "Logger stopped"; exit 0' SIGTERM SIGINT
+
+SHOW_ACPI_EC=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -t|--show-acpi-ec)
+            SHOW_ACPI_EC=1
+            shift
+            ;;
+        *)
+            echo "Unknown argument: $1"
+            exit 1
+            ;;
+    esac
+done
 
 format_temp_c() {
     local mc="$1"
@@ -43,33 +58,136 @@ format_temp_c() {
     esac
 }
 
-get_fan_summary() {
-    local f1 f2 f3 m1 m2 m3 l1 l2 l3 path="/sys/class/ec_su_axb35"
-    local s1 s2 s3 o1 o2 o3
-    if [ -d "$path" ]; then
-        f1=$(cat "$path/fan1/rpm" 2>/dev/null || echo "0")
-        f2=$(cat "$path/fan2/rpm" 2>/dev/null || echo "0")
-        f3=$(cat "$path/fan3/rpm" 2>/dev/null || echo "0")
-        m1=$(cat "$path/fan1/mode" 2>/dev/null || echo "?")
-        m2=$(cat "$path/fan2/mode" 2>/dev/null || echo "?")
-        m3=$(cat "$path/fan3/mode" 2>/dev/null || echo "?")
-        l1=$(cat "$path/fan1/level" 2>/dev/null || echo "?")
-        l2=$(cat "$path/fan2/level" 2>/dev/null || echo "?")
-        l3=$(cat "$path/fan3/level" 2>/dev/null || echo "?")
+read_file_or() {
+    local path="$1" fallback="$2"
+    cat "$path" 2>/dev/null || printf "%s" "$fallback"
+}
 
+read_fan_field() {
+    local fan="$1" field="$2" fallback="$3"
+    read_file_or "$EC_PATH/fan${fan}/${field}" "$fallback"
+}
+
+get_fan_mode() {
+    local m1 l1 s1
+    if [ -d "$EC_PATH" ]; then
+        m1=$(read_fan_field 1 mode "?")
+        l1=$(read_fan_field 1 level "?")
         s1="${m1:0:1}${l1}"
-        s2="${m2:0:1}${l2}"
-        s3="${m3:0:1}${l3}"
-        
-        # Show suffix except for 'a0' (auto mode, level 0)
-        if [[ "$s1" == "a0" ]]; then o1="$f1"; else o1="$f1:$s1"; fi
-        if [[ "$s2" == "a0" ]]; then o2="$f2"; else o2="$f2:$s2"; fi
-        if [[ "$s3" == "a0" ]]; then o3="$f3"; else o3="$f3:$s3"; fi
-
-        printf "%6s %6s %6s" "$o1" "$o2" "$o3"
-    else
-        printf "F: n/a"
+        printf "%s" "$s1"
     fi
+}
+
+get_fan_summary() {
+    local f1 f2 f3
+    if [ -d "$EC_PATH" ]; then
+        f1=$(read_fan_field 1 rpm "0")
+        f2=$(read_fan_field 2 rpm "0")
+        f3=$(read_fan_field 3 rpm "0")
+        printf "%5d%5d%5d" "$f1" "$f2" "$f3"
+    else
+        printf "n/a"
+    fi
+}
+
+get_acpi_temp_c() {
+    local d t val name best_mc=""
+
+    for d in /sys/class/hwmon/hwmon*; do
+        [ -d "$d" ] || continue
+        name=$(cat "$d/name" 2>/dev/null || echo "hwmon")
+        [[ "$name" == acpitz* ]] || continue
+        for t in "$d"/temp*_input; do
+            [ -r "$t" ] || continue
+            val=$(cat "$t" 2>/dev/null)
+            [[ "$val" =~ ^[0-9]+$ ]] || continue
+            if [[ -z "$best_mc" || "$val" -gt "$best_mc" ]]; then
+                best_mc="$val"
+            fi
+        done
+    done
+
+    if [[ -z "$best_mc" ]]; then
+        for d in /sys/class/thermal/thermal_zone*; do
+            [ -d "$d" ] || continue
+            name=$(cat "$d/type" 2>/dev/null || echo "")
+            [[ "$name" == "acpitz" ]] || continue
+            val=$(cat "$d/temp" 2>/dev/null)
+            [[ "$val" =~ ^[0-9]+$ ]] || continue
+            if [[ -z "$best_mc" || "$val" -gt "$best_mc" ]]; then
+                best_mc="$val"
+            fi
+        done
+    fi
+
+    if [[ -z "$best_mc" ]]; then
+        printf "n/a"
+    else
+        printf "%d" "$((best_mc / 1000))"
+    fi
+}
+
+get_ec_temp_c() {
+    local ec
+    ec=$(read_file_or "$EC_PATH/temp1/temp" "n/a")
+    if [[ "$ec" =~ ^[0-9]+$ ]]; then
+        printf "%s" "$ec"
+    else
+        printf "n/a"
+    fi
+}
+
+append_temp_entry() {
+    local value="$1" label="$2"
+    collected+="${value}|${label}"$'\n'
+}
+
+normalize_sensor_name() {
+    local sensor="$1"
+    local base lbl
+
+    if [[ "$sensor" == */* ]]; then
+        base="${sensor%%/*}"
+        lbl="${sensor#*/}"
+    else
+        base=""
+        lbl="$sensor"
+    fi
+
+    if [[ "$base" == r8169_* ]]; then
+        base="r8169"
+    elif [[ "$base" == mt7925_phy* ]]; then
+        base="mt7925"
+    elif [[ "$base" =~ ^nvme([0-9]+)$ ]]; then
+        local idx="${BASH_REMATCH[1]}"
+        base="nvm$idx"
+    fi
+
+    lbl="${lbl//Sensor /S}"
+    lbl="${lbl//Sensor/S}"
+    if [[ "$lbl" =~ ^[Tt]emp([0-9]+)$ ]]; then
+        lbl="${BASH_REMATCH[1]}"
+    elif [[ "$lbl" =~ ^S([0-9]+)$ ]]; then
+        lbl="${BASH_REMATCH[1]}"
+    fi
+
+    if [[ -n "$base" ]]; then
+        if [[ "$base" == "r8169" && "$lbl" == "1" ]]; then
+            sensor="r8169"
+        elif [[ "$base" == "mt7925" && "$lbl" == "1" ]]; then
+            sensor="mt7925"
+        elif [[ "$base" == nvm* && "$lbl" == "Composite" ]]; then
+            sensor="compo${base#nvm}"
+        elif [[ "$base" == nvm* && "$lbl" =~ ^[0-9]+$ ]]; then
+            sensor="$base $lbl"
+        else
+            sensor="$base/$lbl"
+        fi
+    else
+        sensor="$lbl"
+    fi
+
+    printf "%s" "$sensor"
 }
 
 get_temp_summary() {
@@ -99,8 +217,7 @@ get_temp_summary() {
             sensor_id=$(basename "$t")
             sensor_id="${sensor_id%_input}"
             label=$(cat "$d/${sensor_id}_label" 2>/dev/null || echo "$sensor_id")
-            collected+="${val}|${name}/${label}"$'
-'
+            append_temp_entry "$val" "${name}/${label}"
         done
     done
 
@@ -110,8 +227,7 @@ get_temp_summary() {
             val=$(cat "$zone/temp" 2>/dev/null)
             [[ "$val" =~ ^[0-9]+$ ]] || continue
             label=$(cat "$zone/type" 2>/dev/null || basename "$zone")
-            collected+="${val}|${label}"$'
-'
+            append_temp_entry "$val" "$label"
         done
     fi
 
@@ -147,47 +263,7 @@ get_temp_summary() {
     while IFS='|' read -r mc sensor; do
         [[ -z "$mc" ]] && continue
         local t_fmt
-        local base lbl
-        if [[ "$sensor" == */* ]]; then
-            base="${sensor%%/*}"
-            lbl="${sensor#*/}"
-        else
-            base=""
-            lbl="$sensor"
-        fi
-
-        if [[ "$base" == r8169_* ]]; then
-            base="r8169"
-        elif [[ "$base" == mt7925_phy* ]]; then
-            base="mt7925"
-        elif [[ "$base" =~ ^nvme([0-9]+)$ ]]; then
-            local idx="${BASH_REMATCH[1]}"
-            base="nvm$idx"
-        fi
-
-        lbl="${lbl//Sensor /S}"
-        lbl="${lbl//Sensor/S}"
-        if [[ "$lbl" =~ ^[Tt]emp([0-9]+)$ ]]; then
-            lbl="${BASH_REMATCH[1]}"
-        elif [[ "$lbl" =~ ^S([0-9]+)$ ]]; then
-            lbl="${BASH_REMATCH[1]}"
-        fi
-
-        if [[ -n "$base" ]]; then
-            if [[ "$base" == "r8169" && "$lbl" == "1" ]]; then
-                sensor="r8169"
-            elif [[ "$base" == "mt7925" && "$lbl" == "1" ]]; then
-                sensor="mt7925"
-            elif [[ "$base" == nvm* && "$lbl" == "Composite" ]]; then
-                sensor="compo${base#nvm}"
-            elif [[ "$base" == nvm* && "$lbl" =~ ^[0-9]+$ ]]; then
-                sensor="$base $lbl"
-            else
-                sensor="$base/$lbl"
-            fi
-        else
-            sensor="$lbl"
-        fi
+        sensor="$(normalize_sensor_name "$sensor")"
 
         # Suspected stuck sensor filter:
         if [[ "$sensor" == "nvm0 2" || "$sensor" == "nvm1 2" ]]; then
@@ -258,9 +334,25 @@ while true; do
     fi
 
     TEMP_SUMMARY=$(get_temp_summary)
+    
+    if [ "$SHOW_ACPI_EC" -eq 1 ]; then
+        ACPI_TEMP=$(get_acpi_temp_c)
+        EC_TEMP=$(get_ec_temp_c)
+        if [[ "$ACPI_TEMP" =~ ^[0-9]+$ && "$EC_TEMP" =~ ^[0-9]+$ ]]; then
+            TEMP_DELTA=$((ACPI_TEMP - EC_TEMP))
+            TEMP_BLOCK=$(printf "T=acpi:%sC ec:%sC Δ:%+dC" "$ACPI_TEMP" "$EC_TEMP" "$TEMP_DELTA")
+        else
+            TEMP_BLOCK=$(printf "T=acpi:%s ec:%s Δ:n/a" "$ACPI_TEMP" "$EC_TEMP")
+        fi
+        TEMP_BLOCK="  $TEMP_BLOCK"
+    else
+        TEMP_BLOCK=""
+    fi
+    
+    FAN_MODE=$(get_fan_mode)
     FAN_SUMMARY=$(get_fan_summary)
     TOP_PROCS=$(get_top_procs)
 
-    echo "$TIMESTAMP $TOP_PROCS  F= $FAN_SUMMARY  C= $TEMP_SUMMARY" >> "$LOG_DIR/$LOG_PREFIX-$CURRENT_DATE.log"
+    echo "$TIMESTAMP $TOP_PROCS  $FAN_MODE$FAN_SUMMARY$TEMP_BLOCK  C= $TEMP_SUMMARY" >> "$LOG_DIR/$LOG_PREFIX-$CURRENT_DATE.log"
     sleep "$INTERVAL"
 done
