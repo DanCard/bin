@@ -168,8 +168,8 @@ usage() {
     cat <<'EOF'
 Usage:
   fan-profile [--verbose|--quiet] [--debug-reads] status
-  fan-profile [--verbose|--quiet] [--debug-reads] auto
-  fan-profile [--verbose|--quiet] [--debug-reads] smooth
+  fan-profile [--verbose|--quiet] [--debug-reads] apply auto
+  fan-profile [--verbose|--quiet] [--debug-reads] apply smooth
   fan-profile [--verbose|--quiet] [--debug-reads] explain
 
 Profiles:
@@ -185,6 +185,7 @@ EOF
 
 main() {
     local cmd=""
+    local arg=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --verbose|-v)
@@ -202,6 +203,7 @@ main() {
             *)
                 cmd="$1"
                 shift
+                arg="${1:-}"
                 break
                 ;;
         esac
@@ -215,13 +217,22 @@ main() {
         status)
             status
             ;;
-        auto)
-            set_auto
-            status
-            ;;
-        smooth)
-            set_smooth_curve
-            status
+        apply)
+            case "$arg" in
+                auto)
+                    set_auto
+                    status
+                    ;;
+                smooth)
+                    set_smooth_curve
+                    status
+                    ;;
+                *)
+                    log ERROR "apply requires a profile: auto | smooth"
+                    usage
+                    exit 1
+                    ;;
+            esac
             ;;
         explain)
             explain_smooth

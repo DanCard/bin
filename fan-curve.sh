@@ -6,8 +6,9 @@ SYSFS=/sys/class/ec_su_axb35
 FANS="fan1 fan2 fan3"
 
 usage() {
-    echo "Usage: $0 [--reset] [--status] [--probe]"
-    echo "  (no args)  Set curve mode with optimized thresholds"
+    echo "Usage: $0 [--status] [--apply] [--reset] [--probe]"
+    echo "  (no args)  Show current fan state"
+    echo "  --apply    Set curve mode with optimized thresholds"
     echo "  --reset    Restore auto mode on all fans"
     echo "  --status   Show current fan state"
     echo "  --probe    Probe EC codes on all fans"
@@ -72,6 +73,32 @@ do_reset() {
     log "=== All fans restored to auto mode ==="
 }
 
+probe_target() {
+    local label="$1" ; shift
+    local fans=("$@")
+
+    log "[$label] before: $(get_rpms)"
+    sleep 1
+    for f in "${fans[@]}"; do set_sysfs "$f/mode" fixed; set_sysfs "$f/raw_level" 8; done
+    sleep 1
+    log "[$label] off: $(get_rpms)"
+
+    log "[$label] Setting raw_level=2..."
+    for f in "${fans[@]}"; do set_sysfs "$f/raw_level" 2; done
+
+    local elapsed=0
+    for delay in 3 1 1; do
+        sleep "$delay"
+        elapsed=$((elapsed + delay))
+        log "[$label] +${elapsed}s: $(get_rpms)"
+    done
+
+    log "[$label] Restoring auto mode..."
+    for f in "${fans[@]}"; do set_sysfs "$f/mode" auto; done
+    sleep 1
+    log "[$label] restored: $(get_rpms)"
+}
+
 do_probe() {
     log "=== Probing fans individually ==="
     log "Initial: $(get_rpms)"
@@ -79,52 +106,12 @@ do_probe() {
     for active in $FANS; do
         log ""
         log "--- Probing $active (others untouched) ---"
-        log "[$active] before: $(get_rpms)"
-        sleep 1
-        set_sysfs "$active/mode" fixed
-        set_sysfs "$active/raw_level" 8
-        sleep 1
-        log "[$active] off: $(get_rpms)"
-
-        log "[$active] Setting raw_level=2..."
-        set_sysfs "$active/raw_level" 2
-
-        local elapsed=0
-        for delay in 3 1 1; do
-            sleep "$delay"
-            elapsed=$((elapsed + delay))
-            log "[$active] +${elapsed}s: $(get_rpms)"
-        done
-
-        log "[$active] Restoring auto mode..."
-        set_sysfs "$active/mode" auto
-        sleep 1
-        log "[$active] restored: $(get_rpms)"
+        probe_target "$active" "$active"
     done
 
     log ""
     log "--- Probing all fans together ---"
-    log "[all] before: $(get_rpms)"
-    sleep 1
-    set_all mode fixed
-    set_all raw_level 8
-    sleep 1
-    log "[all] off: $(get_rpms)"
-
-    log "[all] Setting raw_level=2..."
-    set_all raw_level 2
-
-    local elapsed=0
-    for delay in 3 1 1; do
-        sleep "$delay"
-        elapsed=$((elapsed + delay))
-        log "[all] +${elapsed}s: $(get_rpms)"
-    done
-
-    log "[all] Restoring auto mode..."
-    set_all mode auto
-    sleep 1
-    log "[all] restored: $(get_rpms)"
+    probe_target "all" $FANS
 
     log ""
     log "Probe complete."
@@ -147,9 +134,10 @@ do_curve() {
 
 case "${1:-}" in
     --help|-h) usage ;;
+    --apply)   do_curve ;;
     --reset)   do_reset ;;
     --status)  do_status ;;
     --probe)   do_probe ;;
-    "")        do_curve ;;
+    "")        do_status ;;
     *)         echo "Unknown option: $1"; usage ;;
 esac
