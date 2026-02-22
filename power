@@ -67,5 +67,7 @@ if [ -n "$BRIGHTNESS_TIMEOUT" ]; then
     xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/brightness-on-ac -n -t int -s $BRIGHTNESS_TIMEOUT
 fi
 
+xset +dpms
+
 set +x  # Disable command echoing
 # echo "Settings applied successfully using xfconf-query."

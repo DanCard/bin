@@ -124,8 +124,8 @@ do_curve() {
 
     # Config for all fans: off below 27°C, unified curve starting at 40°C
     log "Configuring unified curve for all fans..."
-    set_all rampup_curve "40,60,74,86,94"
-    set_all rampdown_curve "30,44,62,76,84"
+    set_all rampup_curve   "45,50,74,86,94"
+    set_all rampdown_curve "35,44,62,76,84"
     set_all mode curve
 
     log ""

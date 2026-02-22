@@ -50,6 +50,7 @@ format_sleep() {
 blank=$(get_xf "blank-on-ac")
 dpms_s=$(get_xf "dpms-on-ac-sleep")
 dpms_o=$(get_xf "dpms-on-ac-off")
+dpms_enabled=$(xset q 2>/dev/null | grep -c "DPMS is Enabled")
 
 # SUSPEND Data
 inact=$(get_xf "inactivity-on-ac")
@@ -63,5 +64,5 @@ NC='\033[0m' # No Color
 
 # COMPRESSED OUTPUT
 echo -e "${CYAN}PERFORMANCE: Gov: $cpu_gov  APU: $apu_mode  Idle: $idle_drv${NC}"
-echo -e "${YELLOW}SCREEN:      Blank: $(format_time "$blank")  Sleep: $(format_time "$dpms_s")  Off: $(format_time "$dpms_o")${NC}"
+echo -e "${YELLOW}SCREEN:      Blank: $(format_time "$blank")  Sleep: $(format_time "$dpms_s")  Off: $(format_time "$dpms_o")  DPMS: $([ "$dpms_enabled" = "1" ] && echo "On" || echo "OFF")${NC}"
 echo -e "${WHITE}SUSPEND:     Timeout: $(format_time "$inact")  Lock: $(format_bool "$lock")${NC}"

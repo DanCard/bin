@@ -58,6 +58,11 @@ format_temp_c() {
     esac
 }
 
+c_to_f() {
+    local mc="$1"
+    printf "%3d°F   " "$(( (mc * 9 / 5 + 32000) / 1000 ))"
+}
+
 read_file_or() {
     local path="$1" fallback="$2"
     cat "$path" 2>/dev/null || printf "%s" "$fallback"
@@ -272,7 +277,14 @@ get_temp_summary() {
             fi
         fi
 
-        t_fmt=$(printf "%4s %-*.*s" "$(format_temp_c "$mc")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$sensor")
+        local label
+
+        if [[ "$sensor" == acpitz* ]]; then
+            label=$(c_to_f "$mc")
+        else
+            label="$sensor"
+        fi
+        t_fmt=$(printf "%4s %-*.*s" "$(format_temp_c "$mc")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
         if [[ -z "$out" ]]; then
             out="$t_fmt"
         else
