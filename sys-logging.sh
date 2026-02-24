@@ -15,7 +15,7 @@
 # - F1, F2, F3            = AXB35 System Fans 1, 2, 3
 
 LOG_DIR="$HOME/misc/logs"
-INTERVAL=30
+INTERVAL=20
 TOP_N=3
 TEMP_N=5
 TEMP_DECIMALS=0
@@ -56,6 +56,14 @@ format_temp_c() {
         1) printf "%d.%d°" "$((mc / 1000))" "$(((mc % 1000) / 100))" ;;
         *) printf "%d°" "$((mc / 1000))" ;;
     esac
+}
+
+format_temp_cf() {
+    local mc="$1"
+    local c f
+    c=$(format_temp_c "$mc")
+    f=$(( (mc * 9 / 5 + 32000) / 1000 ))
+    printf "%s %d°F" "$c" "$f"
 }
 
 c_to_f() {
@@ -198,6 +206,7 @@ normalize_sensor_name() {
 get_temp_summary() {
     local d t val name sensor_id label zone
     local collected sorted out="" dev_path dev_id
+    local first_non_acpi=1
 
     collected=""
     for d in /sys/class/hwmon/hwmon*; do
@@ -284,7 +293,13 @@ get_temp_summary() {
         else
             label="$sensor"
         fi
-        t_fmt=$(printf "%4s %-*.*s" "$(format_temp_c "$mc")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
+
+        if [[ "$sensor" != acpitz* ]] && (( first_non_acpi )); then
+            t_fmt=$(printf "%s %-*.*s" "$(format_temp_cf "$mc")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
+            first_non_acpi=0
+        else
+            t_fmt=$(printf "%4s %-*.*s" "$(format_temp_c "$mc")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
+        fi
         if [[ -z "$out" ]]; then
             out="$t_fmt"
         else
