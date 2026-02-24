@@ -295,7 +295,7 @@ get_temp_summary() {
         fi
 
         if [[ "$sensor" != acpitz* ]] && (( first_non_acpi )); then
-            t_fmt=$(printf "%s %-*.*s" "$(format_temp_cf "$mc")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
+            t_fmt=$(printf "%s %d°F %-*.*s" "$(format_temp_c "$mc")" "$(( (mc * 9 / 5 + 32000) / 1000 ))" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
             first_non_acpi=0
         else
             t_fmt=$(printf "%4s %-*.*s" "$(format_temp_c "$mc")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
