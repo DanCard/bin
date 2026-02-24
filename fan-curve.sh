@@ -53,8 +53,8 @@ do_status() {
         mode=$(cat "$SYSFS/$fan/mode")
         rpm=$(cat "$SYSFS/$fan/rpm")
         if [ "$mode" != "auto" ]; then
-            level_str=$(cat "$SYSFS/$fan/level")
-            raw_str=$(cat "$SYSFS/$fan/raw_level")
+            level_str=$(cat "$SYSFS/$fan/level" 2>/dev/null || echo "-")
+            raw_str=$(cat "$SYSFS/$fan/raw_level" 2>/dev/null || echo "-")
             rampup=$(cat "$SYSFS/$fan/rampup_curve" 2>/dev/null || echo "-")
             rampdown=$(cat "$SYSFS/$fan/rampdown_curve" 2>/dev/null || echo "-")
         else
@@ -124,8 +124,8 @@ do_curve() {
 
     # Config for all fans: off below 27°C, unified curve starting at 40°C
     log "Configuring unified curve for all fans..."
-    set_all rampup_curve   "45,50,74,86,94"
-    set_all rampdown_curve "35,44,62,76,84"
+    set_all rampup_curve   "39,49,74,86,94"
+    set_all rampdown_curve "33,44,62,76,84"
     set_all mode curve
 
     log ""

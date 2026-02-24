@@ -1,0 +1,17 @@
+#!/bin/sh
+
+case "$1" in
+    pre)
+        # Before suspend: Set fans to auto and balanced power mode
+        # This gives control back to the hardware (EC) firmware
+        echo "auto" > /sys/class/ec_su_axb35/fan1/mode
+        echo "auto" > /sys/class/ec_su_axb35/fan2/mode
+        echo "auto" > /sys/class/ec_su_axb35/fan3/mode
+        echo "balanced" > /sys/class/ec_su_axb35/apu/power_mode
+        ;;
+    post)
+        # After resume: Restore performance mode and fan curves
+        echo "performance" > /sys/class/ec_su_axb35/apu/power_mode
+        /home/dcar/bin/fan-curve.sh --apply
+        ;;
+esac
