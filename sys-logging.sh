@@ -15,7 +15,7 @@
 # - F1, F2, F3            = AXB35 System Fans 1, 2, 3
 
 LOG_DIR="$HOME/misc/logs"
-INTERVAL=20
+INTERVAL=15
 TOP_N=3
 TEMP_N=5
 TEMP_DECIMALS=0
@@ -63,7 +63,7 @@ format_temp_cf() {
     local c f
     c=$(format_temp_c "$mc")
     f=$(( (mc * 9 / 5 + 32000) / 1000 ))
-    printf "%s %d°F" "$c" "$f"
+    printf "%s %3d°F" "$c" "$f"
 }
 
 c_to_f() {
@@ -295,7 +295,7 @@ get_temp_summary() {
         fi
 
         if [[ "$sensor" != acpitz* ]] && (( first_non_acpi )); then
-            t_fmt=$(printf "%s %d°F %-*.*s" "$(format_temp_c "$mc")" "$(( (mc * 9 / 5 + 32000) / 1000 ))" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
+            t_fmt=$(printf "%s %3d°F %-*.*s" "$(format_temp_c "$mc")" "$(( (mc * 9 / 5 + 32000) / 1000 ))" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
             first_non_acpi=0
         else
             t_fmt=$(printf "%4s %-*.*s" "$(format_temp_c "$mc")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
@@ -311,38 +311,76 @@ get_temp_summary() {
 }
 
 get_top_procs() {
-    ps -eo pcpu,comm:${COMM_WIDTH},args --sort=-pcpu --no-headers \
-        | head -n "$TOP_N" \
-        | awk -v top_n="$TOP_N" -v name_w="$PROC_NAME_WIDTH" -v comm_w="$COMM_WIDTH" '
-            {
-                cpu = $1;
-                line = $0; match(line, /[0-9.]+/);
-                rest = substr(line, RSTART + RLENGTH); sub(/^ +/, "", rest);
-                comm = substr(rest, 1, comm_w); sub(/ +$/, "", comm);
-                args_str = substr(rest, comm_w + 2); sub(/^ +/, "", args_str);
+    # Use top in batch mode for a 14-second average.
+    # We use -n 2 because the first iteration is the lifetime average.
+    # The second iteration reflects activity over the 14-second delay (-d 14).
+    top -b -n 2 -d 14 -w 512 -c \
+        | awk -v top_n="$TOP_N" -v name_w="$PROC_NAME_WIDTH" '
+            # Skip to the second iteration of top
+            /^top - / { iter++; next }
+            iter < 2 { next }
+            
+            # Find the process list header
+            /PID USER/ { found=1; next }
+            
+            # Process the top N entries
+            found && proc_count < top_n {
+                # Column 9 is %CPU, column 12+ is COMMAND
+                cpu_val = $9 + 0;
+                if (cpu_val <= 0) next; # Filter out idle processes
 
-                sub(/^\/[^ ]*\//, "", args_str);
-                gsub(/\/home\/[^/ ]+\//, "", args_str);
-                gsub(/\/usr(\/local)?\/(s?bin|libexec)\//, "", args_str);
-
-                if (args_str != "" && index(args_str, comm) == 1) {
-                    extra = substr(args_str, length(comm) + 1); sub(/^ +/, "", extra);
+                cpu = sprintf("%.1f", cpu_val);
+                
+                # Reconstruct command line from all fields starting at 12
+                cmd = "";
+                for (i=12; i<=NF; i++) {
+                    cmd = (cmd == "" ? $i : cmd " " $i);
+                }
+                
+                # Split binary name and arguments
+                split(cmd, parts, " ");
+                binary = parts[1];
+                args = "";
+                for (i=2; i<=length(parts); i++) {
+                    args = (args == "" ? parts[i] : args " " parts[i]);
+                }
+                
+                # Clean up binary (basename)
+                sub(/.*\/+/, "", binary);
+                
+                # Clean up args (home, usr, and leading paths from the first arg)
+                gsub(/\/home\/[^/ ]+\//, "", args);
+                gsub(/\/usr(\/local)?\/(s?bin|libexec)\//, "", args);
+                sub(/^\/[^ ]*\//, "", args); 
+                
+                # Combine binary and args
+                display_name = binary;
+                if (args != "") {
+                    display_name = binary " " args;
+                }
+                
+                # Truncate to match name_w
+                if (length(display_name) > name_w) {
+                    display_name = substr(display_name, 1, name_w);
+                }
+                
+                proc_count++;
+                if (proc_count < top_n) {
+                    printf "%5s%% %-*s  ", cpu, name_w, display_name;
                 } else {
-                    extra = "";
+                    printf "%5s%% %-*s", cpu, name_w, display_name;
                 }
-
-                name = comm;
-                if (extra != "") {
-                    name = comm " " extra;
-                }
-                if (length(name) > name_w) {
-                    name = substr(name, 1, name_w);
-                }
-
-                if (NR < top_n) {
-                    printf "%5s%% %-*s  ", cpu, name_w, name;
-                } else {
-                    printf "%5s%% %-*s", cpu, name_w, name;
+            }
+            
+            END {
+                # Fill remaining slots with spaces to maintain column alignment
+                while (proc_count < top_n) {
+                    proc_count++;
+                    if (proc_count < top_n) {
+                        printf "%*s  ", 7 + name_w, "";
+                    } else {
+                        printf "%*s", 7 + name_w, "";
+                    }
                 }
             }'
 }
@@ -381,5 +419,6 @@ while true; do
     TOP_PROCS=$(get_top_procs)
 
     echo "$TIMESTAMP $TOP_PROCS  $FAN_MODE$FAN_SUMMARY$TEMP_BLOCK  C= $TEMP_SUMMARY" >> "$LOG_DIR/$LOG_PREFIX-$CURRENT_DATE.log"
-    sleep "$INTERVAL"
+    # Safety delay: prevents busy-looping and log flooding if top fails or is interrupted.
+    sleep 1
 done
