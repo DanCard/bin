@@ -179,7 +179,6 @@ echo "------------------------------------------------"
 #       inputs=2  = two input streams
 #       weights=1 1, normalize=0 = prevent amix from halving volume (default 1/N)
 #       duration=longest = keep recording until the longer stream ends
-#       dynaudnorm = dynamic audio normalization for consistent levels
 #   -c:a aac      = encode as AAC audio codec
 #   -b:a 192k     = 192 kbps bitrate (good quality for voice)
 #   -ac 2         = stereo output
@@ -187,8 +186,7 @@ echo "------------------------------------------------"
 ffmpeg -stats -y \
   -f pulse -sample_rate 48000 -i "${VIRTUAL_SINK}.monitor" \
   -f pulse -sample_rate 48000 -i "echocancel_source" \
-  -filter_complex "[0:a]pan=mono|c0=c0,volume=6dB[signal];[1:a]pan=mono|c0=c0,volume=3dB[mic];[signal][mic]amix=inputs=2:duration=longest:weights=1 1:normalize=0,dynaudnorm=p=0.95:m=10:s=5,pan=stereo|c0=c0|c1=c0[out]" \
-  -map "[out]" \
+  -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0" \
   -c:a aac -b:a 192k \
   -ac 2 \
   -t 02:30:00 \

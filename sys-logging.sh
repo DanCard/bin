@@ -15,7 +15,6 @@
 # - F1, F2, F3            = AXB35 System Fans 1, 2, 3
 
 LOG_DIR="$HOME/misc/logs"
-INTERVAL=15
 TOP_N=3
 TEMP_N=5
 TEMP_DECIMALS=0
@@ -314,7 +313,7 @@ get_top_procs() {
     # Use top in batch mode for a 14-second average.
     # We use -n 2 because the first iteration is the lifetime average.
     # The second iteration reflects activity over the 14-second delay (-d 14).
-    top -b -n 2 -d 14 -w 512 -c \
+    top -b -n 2 -d 29 -w 512 -c \
         | awk -v top_n="$TOP_N" -v name_w="$PROC_NAME_WIDTH" '
             # Skip to the second iteration of top
             /^top - / { iter++; next }
@@ -346,7 +345,12 @@ get_top_procs() {
                 }
                 
                 # Clean up binary (basename)
-                sub(/.*\/+/, "", binary);
+                if (binary ~ /^\[/) {
+                    # Kernel thread: strip brackets
+                    gsub(/[\[\]]/, "", binary);
+                } else {
+                    sub(/.*\/+/, "", binary);
+                }
                 
                 # Clean up args (home, usr, and leading paths from the first arg)
                 gsub(/\/home\/[^/ ]+\//, "", args);
@@ -420,5 +424,5 @@ while true; do
 
     echo "$TIMESTAMP $TOP_PROCS  $FAN_MODE$FAN_SUMMARY$TEMP_BLOCK  C= $TEMP_SUMMARY" >> "$LOG_DIR/$LOG_PREFIX-$CURRENT_DATE.log"
     # Safety delay: prevents busy-looping and log flooding if top fails or is interrupted.
-    sleep 1
+    sleep 0.5
 done
