@@ -41,6 +41,9 @@
 #                     - Added dynaudnorm for consistent output levels
 #                     - Set explicit sample_rate 48000 on pulse inputs
 #                     Target: mean volume -25 to -30 dB (was -62 dB)
+#   v1.5  2026-03-01  Simplified filter chain to fix poor quality/low volume.
+#                     - Removed dynaudnorm and explicit pan/volume filters.
+#                     - Reverted to simple amix=normalize=0 to match record-call.sh.
 
 # --- Hardware-specific device names (from `pactl list short sinks/sources`) ---
 SPEAKER="alsa_output.pci-0000_c6_00.6.analog-stereo"          # Built-in speakers
@@ -174,10 +177,9 @@ echo "------------------------------------------------"
 #   -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest"
 #       [0:a]     = first input (Signal audio)
 #       [1:a]     = second input (mic audio)
-#       volume=6dB/3dB = boost signal & mic to compensate for virtual sink levels
 #       amix      = mix both streams into one
 #       inputs=2  = two input streams
-#       weights=1 1, normalize=0 = prevent amix from halving volume (default 1/N)
+#       normalize=0 = prevent amix from halving volume (default 1/N)
 #       duration=longest = keep recording until the longer stream ends
 #   -c:a aac      = encode as AAC audio codec
 #   -b:a 192k     = 192 kbps bitrate (good quality for voice)

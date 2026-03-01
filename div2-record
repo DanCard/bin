@@ -1,106 +1,50 @@
 #!/bin/bash
-
-# Divinity 2 Auto-Record Script (FFMPEG Version)
-# This script handles everything: Screen Capture, Audio, and Game Launch.
-# It uses near-lossless settings (CRF 14) for very high quality.
+# Simplified Divinity 2 Recording Script (FFMPEG VAAPI)
+# Assumes game is already running.
 
 # 1. Configuration
-GAME_APPID="435150"
-GAME_BINARY="EoCApp.exe"
-RESOLUTION=$(xdpyinfo | grep dimensions | awk '{print $2}')
-AUDIO_SOURCE="alsa_output.pci-0000_c6_00.6.analog-stereo.monitor" # Captures ALL system audio (Game + Discord)
 OUTPUT_DIR="$HOME/Videos/Divinity2"
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-OUTPUT_FILE="$OUTPUT_DIR/Divinity2_Session_$TIMESTAMP.mkv"
-
 mkdir -p "$OUTPUT_DIR"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+OUTPUT_FILE="$OUTPUT_DIR/Divinity2_$TIMESTAMP.mkv"
+RESOLUTION=$(xdpyinfo | grep dimensions | awk '{print $2}')
 
-echo "----------------------------------------------------------------"
-echo "  Divinity: Original Sin 2 - Auto-Recording (FFMPEG + GPU)"
-echo "----------------------------------------------------------------"
-echo "  WHAT THIS SCRIPT DOES:"
-echo "  1. Starts high-quality 4K recording using your GPU."
-echo "  2. Captures EVERYTHING you hear (Game + Discord + System Audio)."
-echo "  3. Captures YOUR MICROPHONE (Your voice)."
-echo "  4. Launches Divinity 2 (if not already running) or detects it."
-echo "  5. Monitors the game and STOPS recording automatically when you quit."
-echo ""
-echo "  HOW TO STOP MANUALLY:"
-echo "  - Press 'q' in this terminal to stop recording gracefully."
-echo "  - Or press 'Ctrl+C' to stop recording at any time."
-echo ""
-echo "  WHAT THIS SCRIPT DOES NOT DO:"
-echo "  - Does NOT start Discord (Please open Discord manually if needed)."
-echo "  - Does NOT record individual windows; it records your ENTIRE screen."
-echo ""
-echo "  Current Resolution: $RESOLUTION"
-echo "  Output File:        $OUTPUT_FILE"
-echo "----------------------------------------------------------------"
-echo ""
-read -p "Press Enter to start recording and launch the game... "
-echo ""
+# Automatically detect the monitor source (system audio)
+AUDIO_MONITOR=$(pactl list sources short | grep monitor | grep RUNNING | awk '{print $2}' | head -n 1)
+[ -z "$AUDIO_MONITOR" ] && AUDIO_MONITOR="alsa_output.pci-0000_c6_00.6.analog-stereo.monitor"
 
-# 2. Launch Game (or Detect Existing)
-if pgrep -f "$GAME_BINARY" > /dev/null; then
-    echo "[+] Divinity: Original Sin 2 is already running."
-else
-    echo "[*] Launching game via Steam..."
-    steam steam://run/$GAME_APPID >/dev/null 2>&1 &
-fi
+# Automatically detect the microphone (default input)
+AUDIO_MIC="default"
 
-# Wait for game to be present before starting recording loop
-echo "[*] Waiting for game process ($GAME_BINARY)..."
-TIMEOUT=60
-ELAPSED=0
-while [ $ELAPSED -lt $TIMEOUT ]; do
-    if pgrep -f "$GAME_BINARY" > /dev/null; then
-        echo "[+] Game detected!"
-        break
-    fi
-    sleep 2
-    ELAPSED=$((ELAPSED+2))
+echo "------------------------------------------------"
+echo " Divinity 2 Recording (Simple Mode)"
+echo "------------------------------------------------"
+echo " Output: $OUTPUT_FILE"
+echo " Res:    $RESOLUTION"
+echo " Audio:  $AUDIO_MONITOR"
+echo " Mic:    $AUDIO_MIC"
+echo "------------------------------------------------"
+echo " Recording starting in 10 seconds..."
+echo " (Switch to your game window now!)"
+echo "------------------------------------------------"
+for i in {10..1}; do
+    echo -n "$i... "
+    sleep 1
 done
+echo -e "\n------------------------------------------------"
+echo " Recording started! Press 'q' to stop."
+echo "------------------------------------------------"
 
-# 3. Start Watchdog (Background)
-# This background process will kill the main script (and thus ffmpeg) when the game closes.
-(
-    # Wait for the game to actually exist for a few seconds to avoid race conditions
-    sleep 10
-    while pgrep -f "$GAME_BINARY" > /dev/null; do
-        sleep 5
-    done
-    echo -e "\n[*] Game closed. Stopping recording..."
-    kill -SIGINT $$
-) &
-WATCHDOG_PID=$!
-
-# 4. Start FFMPEG (Foreground)
-# -vaapi_device: Specifies the GPU device to use
-# -vf 'format=nv12,hwupload': Prepares the frames for the hardware encoder
-# -c:v hevc_vaapi: H.265 hardware encoder (High Quality + Efficiency)
-# -rc_mode CQP -qp 18: Quality-based rate control (18 is very high quality)
-# -f pulse -i "$AUDIO_SOURCE": Captures System Audio (Game/Discord)
-# -f pulse -i default: Captures Microphone
-# -filter_complex: Mixes the two audio streams into one track
-# -c:a flac: Lossless audio capture
-
-# Trap Ctrl-C/SIGINT to ensure clean exit
-trap "kill $WATCHDOG_PID 2>/dev/null; echo -e '\n[+] Recording stopped. File saved.'; exit" SIGINT SIGTERM
-
-echo "[*] Starting FFMPEG... (Press 'q' to stop manually)"
-ffmpeg -hide_banner -loglevel info -stats \
+ffmpeg -hide_banner -loglevel warning -stats \
   -vaapi_device /dev/dri/renderD128 \
+  -thread_queue_size 1024 \
   -f x11grab -video_size "$RESOLUTION" -framerate 60 -i :0.0 \
-  -f pulse -i "$AUDIO_SOURCE" \
-  -f pulse -i default \
+  -thread_queue_size 1024 \
+  -f pulse -i "$AUDIO_MONITOR" \
+  -thread_queue_size 1024 \
+  -f pulse -i "$AUDIO_MIC" \
   -filter_complex "[1:a][2:a]amix=inputs=2:duration=first[a]" \
   -map 0:v -map "[a]" \
   -vf 'format=nv12,hwupload' \
-  -c:v hevc_vaapi -rc_mode CQP -qp 18 \
+  -c:v hevc_vaapi -rc_mode CQP -qp 18 -async_depth 4 \
   -c:a flac "$OUTPUT_FILE"
-
-# Final cleanup if ffmpeg exits via 'q'
-kill $WATCHDOG_PID 2>/dev/null
-echo "----------------------------------------------------------------"
-echo "[+] Done. File saved to: $OUTPUT_FILE"
-echo "----------------------------------------------------------------"
