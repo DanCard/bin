@@ -106,7 +106,7 @@ def generate_summary(transcript_path, output_path, max_tokens, url):
         print(f"❌ Error: File not found: {transcript_path}")
         return
 
-    with open(transcript_path, 'r') as f:
+    with open(transcript_path, 'r', encoding='utf-8', errors='replace') as f:
         transcript = f.read()
 
     print(f"📖 Read transcript from {transcript_path} ({len(transcript)} chars)")

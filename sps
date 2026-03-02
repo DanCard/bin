@@ -1,20 +1,14 @@
 #!/bin/bash
 # sps - Display XFCE and Strix Halo hardware power settings in a compact format
 
-# If a parameter is given, call set-power-settings
+# If a parameter is given, call set power settings
 if [ -n "$1" ]; then
-    if [[ "$1" =~ ^[0-9]+$ ]]; then
-        exec "$HOME/bin/set-power-settings" "$1"
-    else
-        echo "Error: Please provide a valid number"
-        exit 1
-    fi
+    exec "$HOME/bin/power" "$1"
 fi
 
 # PERFORMANCE Data
 cpu_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "n/a")
 apu_mode=$(cat /sys/class/ec_su_axb35/apu/power_mode 2>/dev/null || echo "n/a")
-idle_drv=$(cat /sys/devices/system/cpu/cpuidle/current_driver 2>/dev/null || echo "n/a")
 
 # XFCE Data - Fetch once using xfconf-query
 XF_DATA=$(xfconf-query -c xfce4-power-manager -l -v 2>/dev/null)
@@ -47,7 +41,6 @@ format_sleep() {
 }
 
 # SCREEN Data
-blank=$(get_xf "blank-on-ac")
 dpms_s=$(get_xf "dpms-on-ac-sleep")
 dpms_o=$(get_xf "dpms-on-ac-off")
 dpms_enabled=$(xset q 2>/dev/null | grep -c "DPMS is Enabled")
@@ -63,6 +56,6 @@ WHITE='\033[38;2;255;225;255m'
 NC='\033[0m' # No Color
 
 # COMPRESSED OUTPUT
-echo -e "${CYAN}PERFORMANCE: Gov: $cpu_gov  APU: $apu_mode  Idle: $idle_drv${NC}"
-echo -e "${YELLOW}SCREEN:      Blank: $(format_time "$blank")  Sleep: $(format_time "$dpms_s")  Off: $(format_time "$dpms_o")  DPMS: $([ "$dpms_enabled" = "1" ] && echo "On" || echo "OFF")${NC}"
+echo -e "${CYAN}PERFORMANCE: Gov: $cpu_gov  EC (embedded controller) APU power policy: $apu_mode${NC}"
+echo -e "${YELLOW}SCREEN:      Sleep: $(format_time "$dpms_s")  Off: $(format_time "$dpms_o")  DPMS: $([ "$dpms_enabled" = "1" ] && echo "On" || echo "OFF")${NC}"
 echo -e "${WHITE}SUSPEND:     Timeout: $(format_time "$inact")  Lock: $(format_bool "$lock")${NC}"

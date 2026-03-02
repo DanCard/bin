@@ -389,7 +389,11 @@ get_top_procs() {
                 cpu_val = $9 + 0;
                 if (cpu_val <= 0) next; # Filter out idle processes
 
-                cpu = sprintf("%.1f", cpu_val);
+                if (cpu_val >= 1000) {
+                    cpu = sprintf("%.0f", cpu_val);
+                } else {
+                    cpu = sprintf("%.1f", cpu_val);
+                }
                 
                 # Reconstruct command line from all fields starting at 12
                 cmd = "";
