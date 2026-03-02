@@ -1,22 +1,16 @@
 #!/bin/bash
-# Set XFCE power management settings based on screen blank time
+# Set XFCE power management settings based on DPMS sleep time
 
-sps  #  show-power-settings
+# echo "Current settings:"
+sps  # show-power-settings
 
 if [ -z "$1" ]; then
-    echo "Usage: $0 <screen-blank-minutes>"
+    echo "Usage: $0 <sleep-minutes>"
     echo ""
     echo "Example: $0 10"
-    echo "  Sets screen blank to 10 minutes"
-    echo "  Sets DPMS sleep to 11 minutes (blank + 1)"
-    echo "  Sets DPMS off to 12 minutes (sleep + 1)"
-    echo "  Sets system suspend to 30 minutes (blank × 3)"
-    exit 1
-fi
-
-# Validate input is a number
-if ! [[ "$1" =~ ^[0-9]+$ ]]; then
-    echo "Error: Please provide a valid number"
+    echo "  Sets DPMS sleep to 10 minutes"
+    echo "  Sets DPMS off to 11 minutes (sleep + 1)"
+    echo "  Sets system suspend to 30 minutes (sleep x 3)"
     exit 1
 fi
 
@@ -27,30 +21,23 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
-# Get the base time from user input
-BLANK_TIME=$1
-
-# Special case for 0: use minimal values for quick screen off
-if [ "$BLANK_TIME" -eq 0 ]; then
-    BLANK_TIME=1
-    DPMS_SLEEP_TIME=1
-    DPMS_OFF_TIME=1
-    SUSPEND_TIME=1
-else
-    DPMS_SLEEP_TIME=$((BLANK_TIME + 1))
-    DPMS_OFF_TIME=$((BLANK_TIME + 2))
-    if [ "$BLANK_TIME" -le 1 ]; then
-	    BRIGHTNESS_TIMEOUT=500  # 500 milliseconds
-        SUSPEND_TIME=$((BLANK_TIME + 2))
+if [[ "$1" =~ ^[0-9]+$ ]]; then
+    SLEEP_TIME="$1"
+    if [ "$SLEEP_TIME" -eq 0 ]; then
+        DPMS_SLEEP_TIME=1
+        DPMS_OFF_TIME=1
+        SUSPEND_TIME=1
     else
-        SUSPEND_TIME=$((BLANK_TIME * (BLANK_TIME + 1)))
+        DPMS_SLEEP_TIME="$SLEEP_TIME"
+        DPMS_OFF_TIME=$((DPMS_SLEEP_TIME + 1))
+        SUSPEND_TIME=$((DPMS_SLEEP_TIME * 3))
     fi
+else
+    echo "Error: Please provide a valid number"
+    exit 1
 fi
 
 set -x  # Enable command echoing
-
-xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac -s $BLANK_TIME || \
-  xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac -n -t int -s $BLANK_TIME
 
 xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-sleep -s $DPMS_SLEEP_TIME || \
   xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-sleep -n -t uint -s $DPMS_SLEEP_TIME
@@ -61,13 +48,9 @@ xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-off -s $D
 xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/inactivity-on-ac -s $SUSPEND_TIME || \
   xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/inactivity-on-ac -n -t uint -s $SUSPEND_TIME
 
-# Set brightness timeout if specified (for parameter 0)
-if [ -n "$BRIGHTNESS_TIMEOUT" ]; then
-  xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/brightness-on-ac -s $BRIGHTNESS_TIMEOUT || \
-    xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/brightness-on-ac -n -t int -s $BRIGHTNESS_TIMEOUT
-fi
+xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-enabled -s true || \
+  xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-enabled -n -t bool -s true
 
 xset +dpms
 
 set +x  # Disable command echoing
-# echo "Settings applied successfully using xfconf-query."
