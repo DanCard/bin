@@ -24,6 +24,8 @@ COMM_WIDTH=15
 LOG_RETENTION_DAYS=180
 LOG_PREFIX="sys-logging"
 EC_PATH="/sys/class/ec_su_axb35"
+DEFAULT_TOP_SAMPLE_DELAY=29
+LOOP_SAFETY_SLEEP=0.1
 
 mkdir -p "$LOG_DIR"
 
@@ -90,15 +92,73 @@ get_fan_mode() {
     fi
 }
 
-get_fan_summary() {
+sanitize_rpm() {
+    local rpm="$1"
+    if [[ "$rpm" =~ ^[0-9]+$ ]]; then
+        printf "%s" "$rpm"
+    else
+        printf "0"
+    fi
+}
+
+rpm_to_level() {
+    local rpm
+    rpm=$(sanitize_rpm "$1")
+    # User-provided RPM thresholds:
+    # L1: 1500, L2: 2400, L3: 3300, L4: 4100, L5: 4800+.
+    if (( rpm >= 4800 )); then printf "5"
+    elif (( rpm >= 4100 )); then printf "4"
+    elif (( rpm >= 3300 )); then printf "3"
+    elif (( rpm >= 2400 )); then printf "2"
+    elif (( rpm >= 1500 )); then printf "1"
+    else printf "0"
+    fi
+}
+
+get_effective_level_from_rpms() {
+    local fan1_rpm="$1" fan2_rpm="$2" fan3_rpm="$3"
+    local l1 l2 l3 max_level
+    l1=$(rpm_to_level "$fan1_rpm")
+    l2=$(rpm_to_level "$fan2_rpm")
+    l3=$(rpm_to_level "$fan3_rpm")
+    max_level="$l1"
+    if (( l2 > max_level )); then max_level="$l2"; fi
+    if (( l3 > max_level )); then max_level="$l3"; fi
+    printf "%s" "$max_level"
+}
+
+get_burst_interval_for_level() {
+    local level="$1"
+    # Burst logging schedule:
+    # L2: 15s for 60s, L3: 8s for 60s, L4: 4s for 30s, L5: 2s for 16s.
+    case "$level" in
+        2) printf "15" ;;
+        3) printf "8" ;;
+        4) printf "4" ;;
+        5) printf "2" ;;
+        *) printf "%s" "$DEFAULT_TOP_SAMPLE_DELAY" ;;
+    esac
+}
+
+get_burst_duration_ms_for_level() {
+    local level="$1"
+    case "$level" in
+        2|3) printf "60000" ;;
+        4) printf "30000" ;;
+        5) printf "16000" ;;
+        *) printf "0" ;;
+    esac
+}
+
+get_fan_rpms() {
     local f1 f2 f3
     if [ -d "$EC_PATH" ]; then
         f1=$(read_fan_field 1 rpm "0")
         f2=$(read_fan_field 2 rpm "0")
         f3=$(read_fan_field 3 rpm "0")
-        printf "%5d%5d%5d" "$f1" "$f2" "$f3"
+        printf "%s %s %s" "$(sanitize_rpm "$f1")" "$(sanitize_rpm "$f2")" "$(sanitize_rpm "$f3")"
     else
-        printf "n/a"
+        printf "0 0 0"
     fi
 }
 
@@ -310,10 +370,11 @@ get_temp_summary() {
 }
 
 get_top_procs() {
-    # Use top in batch mode for a 14-second average.
+    local sample_delay="$1"
+    # Use top in batch mode for an N-second average.
     # We use -n 2 because the first iteration is the lifetime average.
-    # The second iteration reflects activity over the 14-second delay (-d 14).
-    top -b -n 2 -d 29 -w 512 -c \
+    # The second iteration reflects activity over the sample delay (-d N).
+    top -b -n 2 -d "$sample_delay" -w 512 -c \
         | awk -v top_n="$TOP_N" -v name_w="$PROC_NAME_WIDTH" '
             # Skip to the second iteration of top
             /^top - / { iter++; next }
@@ -392,6 +453,8 @@ get_top_procs() {
 log_msg "Starting system logging (CPU + Thermal + Fans)"
 
 LAST_CLEANUP_DATE=""
+ACTIVE_BURST_LEVEL=0
+ACTIVE_BURST_UNTIL_MS=0
 while true; do
     DATETIME=$(date '+%Y-%m-%d %H:%M:%S')
     CURRENT_DATE=${DATETIME%% *}
@@ -419,10 +482,35 @@ while true; do
     fi
     
     FAN_MODE=$(get_fan_mode)
-    FAN_SUMMARY=$(get_fan_summary)
-    TOP_PROCS=$(get_top_procs)
+    read -r FAN1_RPM FAN2_RPM FAN3_RPM <<< "$(get_fan_rpms)"
+    FAN_SUMMARY=$(printf "%5d%5d%5d" "$FAN1_RPM" "$FAN2_RPM" "$FAN3_RPM")
+    EFFECTIVE_LEVEL=$(get_effective_level_from_rpms "$FAN1_RPM" "$FAN2_RPM" "$FAN3_RPM")
+    NOW_MS=$(date +%s%3N)
+
+    if (( NOW_MS >= ACTIVE_BURST_UNTIL_MS )); then
+        ACTIVE_BURST_LEVEL=0
+        ACTIVE_BURST_UNTIL_MS=0
+    fi
+
+    if (( EFFECTIVE_LEVEL >= 2 && EFFECTIVE_LEVEL <= 5 )); then
+        BURST_DURATION_MS=$(get_burst_duration_ms_for_level "$EFFECTIVE_LEVEL")
+        CANDIDATE_UNTIL_MS=$((NOW_MS + BURST_DURATION_MS))
+        if (( EFFECTIVE_LEVEL > ACTIVE_BURST_LEVEL )); then
+            ACTIVE_BURST_LEVEL=$EFFECTIVE_LEVEL
+            ACTIVE_BURST_UNTIL_MS=$CANDIDATE_UNTIL_MS
+        elif (( EFFECTIVE_LEVEL == ACTIVE_BURST_LEVEL && CANDIDATE_UNTIL_MS > ACTIVE_BURST_UNTIL_MS )); then
+            ACTIVE_BURST_UNTIL_MS=$CANDIDATE_UNTIL_MS
+        fi
+    fi
+
+    TOP_SAMPLE_DELAY="$DEFAULT_TOP_SAMPLE_DELAY"
+    if (( ACTIVE_BURST_LEVEL >= 2 && ACTIVE_BURST_LEVEL <= 5 )); then
+        TOP_SAMPLE_DELAY=$(get_burst_interval_for_level "$ACTIVE_BURST_LEVEL")
+    fi
+
+    TOP_PROCS=$(get_top_procs "$TOP_SAMPLE_DELAY")
 
     echo "$TIMESTAMP $TOP_PROCS  $FAN_MODE$FAN_SUMMARY$TEMP_BLOCK  C= $TEMP_SUMMARY" >> "$LOG_DIR/$LOG_PREFIX-$CURRENT_DATE.log"
-    # Safety delay: prevents busy-looping and log flooding if top fails or is interrupted.
-    sleep 0.5
+    # Safety delay prevents busy-looping if top fails or is interrupted.
+    sleep "$LOOP_SAFETY_SLEEP"
 done
