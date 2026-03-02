@@ -5,12 +5,17 @@
 sps  # show-power-settings
 
 if [ -z "$1" ]; then
-    echo "Usage: $0 <sleep-minutes>"
+    echo "Usage: $0 <sleep-minutes> [suspend-minutes]"
     echo ""
     echo "Example: $0 10"
     echo "  Sets DPMS sleep to 10 minutes"
     echo "  Sets DPMS off to 11 minutes (sleep + 1)"
     echo "  Sets system suspend to 30 minutes (sleep x 3)"
+    echo ""
+    echo "Example: $0 10 60"
+    echo "  Sets DPMS sleep to 10 minutes"
+    echo "  Sets DPMS off to 11 minutes (sleep + 1)"
+    echo "  Sets system suspend to 60 minutes (explicitly)"
     exit 1
 fi
 
@@ -31,6 +36,16 @@ if [[ "$1" =~ ^[0-9]+$ ]]; then
         DPMS_SLEEP_TIME="$SLEEP_TIME"
         DPMS_OFF_TIME=$((DPMS_SLEEP_TIME + 1))
         SUSPEND_TIME=$((DPMS_SLEEP_TIME * 3))
+    fi
+
+    # Override suspend time if second argument is provided
+    if [[ -n "$2" ]]; then
+        if [[ "$2" =~ ^[0-9]+$ ]]; then
+            SUSPEND_TIME="$2"
+        else
+            echo "Error: Second argument must be a valid number"
+            exit 1
+        fi
     fi
 else
     echo "Error: Please provide a valid number"
