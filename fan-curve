@@ -6,13 +6,17 @@ SYSFS=/sys/class/ec_su_axb35
 FANS="fan1 fan2 fan3"
 
 usage() {
-    echo "Usage: $0 [--status] [--apply] [--reset] [--probe]"
+    local code="${1:-0}"
+    echo "Usage: $0 [status|apply|reset|probe|help]"
     echo "  (no args)  Show current fan state"
-    echo "  --apply    Set curve mode with optimized thresholds"
-    echo "  --reset    Restore auto mode on all fans"
-    echo "  --status   Show current fan state"
-    echo "  --probe    Probe EC codes on all fans"
-    exit 0
+    echo "  apply      Set curve mode with optimized thresholds"
+    echo "  reset      Restore auto mode on all fans"
+    echo "  status     Show current fan state"
+    echo "  probe      Probe EC codes on all fans"
+    echo "  help       Show this help text"
+    echo ""
+    echo "Legacy --options are still supported (--apply, --reset, --status, --probe, --help)."
+    exit "$code"
 }
 
 log() {
@@ -133,11 +137,11 @@ do_curve() {
 }
 
 case "${1:-}" in
-    --help|-h) usage ;;
-    --apply)   do_curve ;;
-    --reset)   do_reset ;;
-    --status)  do_status ;;
-    --probe)   do_probe ;;
-    "")        do_status ;;
-    *)         echo "Unknown option: $1"; usage ;;
+    --help|-h|help)      usage ;;
+    --apply|apply)       do_curve ;;
+    --reset|reset)       do_reset ;;
+    --status|status)     do_status ;;
+    --probe|probe)       do_probe ;;
+    "")                  do_status ;;
+    *)                   echo "Unknown option/command: $1"; usage 1 ;;
 esac
