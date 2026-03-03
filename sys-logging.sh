@@ -63,6 +63,8 @@ USR2_PHASE2_INTERVAL="${USR2_PHASE2_INTERVAL:-15}"
 USR2_PHASE2_DURATION_MS="${USR2_PHASE2_DURATION_MS:-120000}"
 STARTUP_BURST_INTERVAL="${STARTUP_BURST_INTERVAL:-15}"
 STARTUP_BURST_DURATION_MS="${STARTUP_BURST_DURATION_MS:-120000}"
+RESUME_BURST_INTERVAL="${RESUME_BURST_INTERVAL:-15}"
+RESUME_BURST_DURATION_MS="${RESUME_BURST_DURATION_MS:-120000}"
 EVENT_QUEUE_FILE=""
 EVENT_MARKERS=""
 
@@ -96,6 +98,14 @@ fi
 
 if [[ ! "$STARTUP_BURST_DURATION_MS" =~ ^[0-9]+$ ]] || (( STARTUP_BURST_DURATION_MS < 1000 )); then
     STARTUP_BURST_DURATION_MS=120000
+fi
+
+if [[ ! "$RESUME_BURST_INTERVAL" =~ ^[0-9]+$ ]] || (( RESUME_BURST_INTERVAL < 1 )); then
+    RESUME_BURST_INTERVAL=15
+fi
+
+if [[ ! "$RESUME_BURST_DURATION_MS" =~ ^[0-9]+$ ]] || (( RESUME_BURST_DURATION_MS < 1000 )); then
+    RESUME_BURST_DURATION_MS=120000
 fi
 
 if [[ ! "$RESUME_DETECT_GRACE_MS" =~ ^[0-9]+$ ]] || (( RESUME_DETECT_GRACE_MS < 1000 )); then
@@ -640,6 +650,12 @@ STARTUP_NOW_MS=$(date +%s%3N)
 ACTIVE_BURST_UNTIL_MS=$((STARTUP_NOW_MS + STARTUP_BURST_DURATION_MS))
 ACTIVE_BURST_INTERVAL_OVERRIDE="$STARTUP_BURST_INTERVAL"
 
+# Bootstrap fan snapshot so first-loop burst logic has a valid input.
+FAN_MODE=$(get_fan_mode)
+read -r FAN1_RPM FAN2_RPM FAN3_RPM <<< "$(get_fan_rpms)"
+FAN_SUMMARY=$(printf "%5d%5d%5d" "$FAN1_RPM" "$FAN2_RPM" "$FAN3_RPM")
+EFFECTIVE_LEVEL=$(get_effective_level_from_rpms "$FAN1_RPM" "$FAN2_RPM" "$FAN3_RPM")
+
 LAST_CLEANUP_DATE=""
 while true; do
     DATETIME=$(date '+%Y-%m-%d %H:%M:%S')
@@ -667,10 +683,6 @@ while true; do
         TEMP_BLOCK=""
     fi
     
-    FAN_MODE=$(get_fan_mode)
-    read -r FAN1_RPM FAN2_RPM FAN3_RPM <<< "$(get_fan_rpms)"
-    FAN_SUMMARY=$(printf "%5d%5d%5d" "$FAN1_RPM" "$FAN2_RPM" "$FAN3_RPM")
-    EFFECTIVE_LEVEL=$(get_effective_level_from_rpms "$FAN1_RPM" "$FAN2_RPM" "$FAN3_RPM")
     NOW_MS=$(date +%s%3N)
     USR1_ACTIVE=0
 
@@ -751,6 +763,12 @@ while true; do
     RESUME_DETECT_THRESHOLD_MS=$((TOP_SAMPLE_DELAY * 1000 + RESUME_DETECT_GRACE_MS))
     if (( SAMPLE_ELAPSED_MS > RESUME_DETECT_THRESHOLD_MS )); then
         enqueue_event_marker "$RESUME_EVENT_CODE"
+        RESUME_NOW_MS=$(date +%s%3N)
+        RESUME_CANDIDATE_UNTIL_MS=$((RESUME_NOW_MS + RESUME_BURST_DURATION_MS))
+        if (( RESUME_CANDIDATE_UNTIL_MS > ACTIVE_BURST_UNTIL_MS )); then
+            ACTIVE_BURST_UNTIL_MS=$RESUME_CANDIDATE_UNTIL_MS
+        fi
+        ACTIVE_BURST_INTERVAL_OVERRIDE="$RESUME_BURST_INTERVAL"
     fi
     MIN_SAMPLE_ELAPSED_MS=$((TOP_SAMPLE_DELAY * 1000 - 1000))
     if (( MIN_SAMPLE_ELAPSED_MS < 0 )); then
@@ -773,6 +791,12 @@ while true; do
         continue
     fi
 
+    # Read fan state after top so logged fan values align with sampled procs.
+    FAN_MODE=$(get_fan_mode)
+    read -r FAN1_RPM FAN2_RPM FAN3_RPM <<< "$(get_fan_rpms)"
+    FAN_SUMMARY=$(printf "%5d%5d%5d" "$FAN1_RPM" "$FAN2_RPM" "$FAN3_RPM")
+    NEXT_EFFECTIVE_LEVEL=$(get_effective_level_from_rpms "$FAN1_RPM" "$FAN2_RPM" "$FAN3_RPM")
+
     EVENT_SUFFIX=""
     if [[ -n "$EVENT_MARKERS" ]]; then
         OUTPUT_EVENT_MARKERS=$(filter_event_markers_for_output "$EVENT_MARKERS")
@@ -783,6 +807,7 @@ while true; do
         persist_event_markers
     fi
     echo "$TIMESTAMP $TOP_PROCS  $FAN_MODE$FAN_SUMMARY$TEMP_BLOCK  C= $TEMP_SUMMARY$EVENT_SUFFIX" >> "$LOG_DIR/$LOG_PREFIX-$CURRENT_DATE.log"
+    EFFECTIVE_LEVEL="$NEXT_EFFECTIVE_LEVEL"
     # Safety delay prevents busy-looping if top fails or is interrupted.
     sleep "$LOOP_SAFETY_SLEEP"
 done
