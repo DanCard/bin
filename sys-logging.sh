@@ -45,15 +45,12 @@ USER_BURST_EVENT_CODE="🏃"
 BURST_EVENT_CODE="🌀"
 # Event markers are appended to the next telemetry line:
 # - ▷   service start
-# - X   service stop
 # - 🏃1  SIGUSR1 burst request
+# - 🏃1E SIGUSR1 burst complete
 # - 🏃2  SIGUSR2 profile request
 # - 🏃2C SIGUSR2 profile complete
-# - 🌀<sec> burst frequency set/changed (for example 🌀5, 🌀15)
-# - 🌀E burst frequency returned to default
-# Notes:
-# - Markers are comma-separated tokens with no sequence suffix.
-# - If X and ▷ would be emitted on the same line, X is dropped as implied by ▷.
+# - 🌀N  level-based burst frequency set/changed (N = level 2-5)
+# - 🌀E level-based burst complete
 MANUAL_BURST_LEVEL="${MANUAL_BURST_LEVEL:-2}"
 MANUAL_BURST_DURATION_MS="${MANUAL_BURST_DURATION_MS:-120000}"
 USR2_PHASE1_INTERVAL="${USR2_PHASE1_INTERVAL:-5}"
@@ -103,6 +100,9 @@ ACTIVE_BURST_INTERVAL_OVERRIDE=""
 USR2_PHASE1_UNTIL_MS=0
 USR2_PHASE2_UNTIL_MS=0
 LAST_BURST_DELAY=""
+LAST_BURST_SOURCE=""
+USR1_BURST_UNTIL_MS=0
+LAST_USR1_ACTIVE=0
 
 mkdir -p "$LOG_DIR"
 EVENT_QUEUE_FILE="$LOG_DIR/.${LOG_PREFIX}.event-queue"
@@ -137,10 +137,10 @@ filter_event_markers_for_output() {
     local has_start=0 has_stop=0 out="" marker code
     local marker_list=()
 
-    IFS=',' read -r -a marker_list <<< "$markers"
+    read -r -a marker_list <<< "$markers"
     for marker in "${marker_list[@]}"; do
         [[ -z "$marker" ]] && continue
-        code="${marker%%@*}"
+        code="$marker"
         if [[ "$code" == "$START_EVENT_CODE" ]]; then
             has_start=1
         elif [[ "$code" == "X" ]]; then
@@ -151,10 +151,10 @@ filter_event_markers_for_output() {
     if (( has_start && has_stop )); then
         for marker in "${marker_list[@]}"; do
             [[ -z "$marker" ]] && continue
-            code="${marker%%@*}"
+            code="$marker"
             [[ "$code" == "X" ]] && continue
             if [[ -n "$out" ]]; then
-                out="${out},${marker}"
+                out="${out} ${marker}"
             else
                 out="$marker"
             fi
@@ -166,7 +166,6 @@ filter_event_markers_for_output() {
 }
 
 handle_stop() {
-    enqueue_event_marker "X"
     exit 0
 }
 
@@ -177,6 +176,9 @@ activate_manual_burst() {
     USR2_PHASE2_UNTIL_MS=0
     now_ms=$(date +%s%3N)
     candidate_until_ms=$((now_ms + MANUAL_BURST_DURATION_MS))
+    if (( candidate_until_ms > USR1_BURST_UNTIL_MS )); then
+        USR1_BURST_UNTIL_MS=$candidate_until_ms
+    fi
 
     if (( MANUAL_BURST_LEVEL > ACTIVE_BURST_LEVEL )); then
         ACTIVE_BURST_LEVEL=$MANUAL_BURST_LEVEL
@@ -662,6 +664,7 @@ while true; do
     FAN_SUMMARY=$(printf "%5d%5d%5d" "$FAN1_RPM" "$FAN2_RPM" "$FAN3_RPM")
     EFFECTIVE_LEVEL=$(get_effective_level_from_rpms "$FAN1_RPM" "$FAN2_RPM" "$FAN3_RPM")
     NOW_MS=$(date +%s%3N)
+    USR1_ACTIVE=0
 
     if (( USR2_PHASE2_UNTIL_MS > 0 )); then
         if (( NOW_MS < USR2_PHASE1_UNTIL_MS )); then
@@ -674,6 +677,17 @@ while true; do
             USR2_PHASE2_UNTIL_MS=0
             enqueue_event_marker "${USER_BURST_EVENT_CODE}2C"
         fi
+    fi
+
+    if (( USR1_BURST_UNTIL_MS > NOW_MS )); then
+        USR1_ACTIVE=1
+    fi
+    if (( LAST_USR1_ACTIVE == 1 && USR1_ACTIVE == 0 )); then
+        enqueue_event_marker "${USER_BURST_EVENT_CODE}1E"
+    fi
+    LAST_USR1_ACTIVE=$USR1_ACTIVE
+    if (( USR1_BURST_UNTIL_MS > 0 && NOW_MS >= USR1_BURST_UNTIL_MS )); then
+        USR1_BURST_UNTIL_MS=0
     fi
 
     if (( NOW_MS >= ACTIVE_BURST_UNTIL_MS )); then
@@ -700,15 +714,27 @@ while true; do
         TOP_SAMPLE_DELAY=$(get_burst_interval_for_level "$ACTIVE_BURST_LEVEL")
     fi
 
+    CURRENT_BURST_SOURCE=""
     if (( TOP_SAMPLE_DELAY != DEFAULT_TOP_SAMPLE_DELAY )); then
-        if [[ "$TOP_SAMPLE_DELAY" != "$LAST_BURST_DELAY" ]]; then
-            enqueue_event_marker "${BURST_EVENT_CODE}${TOP_SAMPLE_DELAY}"
-            LAST_BURST_DELAY="$TOP_SAMPLE_DELAY"
+        if [[ -n "$ACTIVE_BURST_INTERVAL_OVERRIDE" ]]; then
+            CURRENT_BURST_SOURCE="override"
+        elif (( USR1_ACTIVE == 1 )); then
+            CURRENT_BURST_SOURCE="usr1"
+        elif (( ACTIVE_BURST_LEVEL >= 2 && ACTIVE_BURST_LEVEL <= 5 )); then
+            CURRENT_BURST_SOURCE="level"
         fi
-    elif [[ -n "$LAST_BURST_DELAY" ]]; then
+    fi
+
+    if [[ "$CURRENT_BURST_SOURCE" == "level" ]]; then
+        if [[ "$LAST_BURST_SOURCE" != "level" || "$TOP_SAMPLE_DELAY" != "$LAST_BURST_DELAY" ]]; then
+            enqueue_event_marker "${BURST_EVENT_CODE}${ACTIVE_BURST_LEVEL}"
+        fi
+        LAST_BURST_DELAY="$TOP_SAMPLE_DELAY"
+    elif [[ "$LAST_BURST_SOURCE" == "level" ]]; then
         enqueue_event_marker "${BURST_EVENT_CODE}E"
         LAST_BURST_DELAY=""
     fi
+    LAST_BURST_SOURCE="$CURRENT_BURST_SOURCE"
 
     SAMPLE_START_MS=$(date +%s%3N)
     TOP_PROCS=$(get_top_procs "$TOP_SAMPLE_DELAY")
