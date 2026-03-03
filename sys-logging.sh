@@ -46,6 +46,8 @@ LOOP_SAFETY_SLEEP=0.1
 # - @U1<n>  SIGUSR1 burst request
 # - @U2<n>  SIGUSR2 profile request
 # - @U2C<n> SIGUSR2 profile complete
+# - @B<sec><n> burst frequency set/changed (for example @B5<n>, @B15<n>)
+# - @BE<n>  burst frequency returned to default
 MANUAL_BURST_LEVEL="${MANUAL_BURST_LEVEL:-2}"
 MANUAL_BURST_DURATION_MS="${MANUAL_BURST_DURATION_MS:-120000}"
 USR2_PHASE1_INTERVAL="${USR2_PHASE1_INTERVAL:-5}"
@@ -85,6 +87,7 @@ ACTIVE_BURST_UNTIL_MS=0
 ACTIVE_BURST_INTERVAL_OVERRIDE=""
 USR2_PHASE1_UNTIL_MS=0
 USR2_PHASE2_UNTIL_MS=0
+LAST_BURST_DELAY=""
 
 mkdir -p "$LOG_DIR"
 EVENT_QUEUE_FILE="$LOG_DIR/.${LOG_PREFIX}.event-queue"
@@ -663,6 +666,16 @@ while true; do
         TOP_SAMPLE_DELAY=$(get_burst_interval_for_level "$ACTIVE_BURST_LEVEL")
     fi
 
+    if (( TOP_SAMPLE_DELAY != DEFAULT_TOP_SAMPLE_DELAY )); then
+        if [[ "$TOP_SAMPLE_DELAY" != "$LAST_BURST_DELAY" ]]; then
+            enqueue_event_marker "B${TOP_SAMPLE_DELAY}"
+            LAST_BURST_DELAY="$TOP_SAMPLE_DELAY"
+        fi
+    elif [[ -n "$LAST_BURST_DELAY" ]]; then
+        enqueue_event_marker "BE"
+        LAST_BURST_DELAY=""
+    fi
+
     SAMPLE_START_MS=$(date +%s%3N)
     TOP_PROCS=$(get_top_procs "$TOP_SAMPLE_DELAY")
     SAMPLE_END_MS=$(date +%s%3N)
@@ -686,7 +699,6 @@ while true; do
         EVENT_MARKERS=""
         persist_event_markers
     fi
-
     echo "$TIMESTAMP $TOP_PROCS  $FAN_MODE$FAN_SUMMARY$TEMP_BLOCK  C= $TEMP_SUMMARY$EVENT_SUFFIX" >> "$LOG_DIR/$LOG_PREFIX-$CURRENT_DATE.log"
     # Safety delay prevents busy-looping if top fails or is interrupted.
     sleep "$LOOP_SAFETY_SLEEP"
