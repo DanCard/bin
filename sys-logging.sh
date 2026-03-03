@@ -5,6 +5,20 @@
 #   systemctl --user restart sys-logging.service
 #   systemctl --user stop sys-logging.service
 #   systemctl --user start sys-logging.service
+#
+# Signal controls (while service is running):
+#   # Trigger manual burst profile from SIGUSR1
+#   # (defaults: level 2 timing => ~15s sampling for 120s)
+#   # Use --kill-who=main so the current top sample is not interrupted.
+#   systemctl --user kill -s USR1 --kill-who=main sys-logging.service
+#
+#   # Trigger two-stage burst profile from SIGUSR2
+#   # (defaults: 5s sampling for 30s, then 15s for 120s)
+#   systemctl --user kill -s USR2 --kill-who=main sys-logging.service
+#
+#   # Alternative direct signal by PID
+#   kill -USR1 "$(systemctl --user show -p MainPID --value sys-logging.service)"
+#   kill -USR2 "$(systemctl --user show -p MainPID --value sys-logging.service)"
 
 # System Logger: top CPU, thermal summary, and fan speeds on one line.
 # Abbreviation legend used in log output:
@@ -26,14 +40,136 @@ LOG_PREFIX="sys-logging"
 EC_PATH="/sys/class/ec_su_axb35"
 DEFAULT_TOP_SAMPLE_DELAY=29
 LOOP_SAFETY_SLEEP=0.1
+# Event markers are appended to the next telemetry line:
+# - @R<n>   service start
+# - @X<n>   service stop
+# - @U1<n>  SIGUSR1 burst request
+# - @U2<n>  SIGUSR2 profile request
+# - @U2C<n> SIGUSR2 profile complete
+MANUAL_BURST_LEVEL="${MANUAL_BURST_LEVEL:-2}"
+MANUAL_BURST_DURATION_MS="${MANUAL_BURST_DURATION_MS:-120000}"
+USR2_PHASE1_INTERVAL="${USR2_PHASE1_INTERVAL:-5}"
+USR2_PHASE1_DURATION_MS="${USR2_PHASE1_DURATION_MS:-30000}"
+USR2_PHASE2_INTERVAL="${USR2_PHASE2_INTERVAL:-15}"
+USR2_PHASE2_DURATION_MS="${USR2_PHASE2_DURATION_MS:-120000}"
+EVENT_QUEUE_FILE=""
+EVENT_SEQ_FILE=""
+EVENT_MARKERS=""
+
+if [[ ! "$MANUAL_BURST_LEVEL" =~ ^[0-9]+$ ]] || (( MANUAL_BURST_LEVEL < 0 || MANUAL_BURST_LEVEL > 5 )); then
+    MANUAL_BURST_LEVEL=2
+fi
+
+if [[ ! "$MANUAL_BURST_DURATION_MS" =~ ^[0-9]+$ ]] || (( MANUAL_BURST_DURATION_MS < 1000 )); then
+    MANUAL_BURST_DURATION_MS=120000
+fi
+
+if [[ ! "$USR2_PHASE1_INTERVAL" =~ ^[0-9]+$ ]] || (( USR2_PHASE1_INTERVAL < 1 )); then
+    USR2_PHASE1_INTERVAL=5
+fi
+
+if [[ ! "$USR2_PHASE1_DURATION_MS" =~ ^[0-9]+$ ]] || (( USR2_PHASE1_DURATION_MS < 1000 )); then
+    USR2_PHASE1_DURATION_MS=30000
+fi
+
+if [[ ! "$USR2_PHASE2_INTERVAL" =~ ^[0-9]+$ ]] || (( USR2_PHASE2_INTERVAL < 1 )); then
+    USR2_PHASE2_INTERVAL=15
+fi
+
+if [[ ! "$USR2_PHASE2_DURATION_MS" =~ ^[0-9]+$ ]] || (( USR2_PHASE2_DURATION_MS < 1000 )); then
+    USR2_PHASE2_DURATION_MS=120000
+fi
+
+ACTIVE_BURST_LEVEL=0
+ACTIVE_BURST_UNTIL_MS=0
+ACTIVE_BURST_INTERVAL_OVERRIDE=""
+USR2_PHASE1_UNTIL_MS=0
+USR2_PHASE2_UNTIL_MS=0
 
 mkdir -p "$LOG_DIR"
+EVENT_QUEUE_FILE="$LOG_DIR/.${LOG_PREFIX}.event-queue"
+EVENT_SEQ_FILE="$LOG_DIR/.${LOG_PREFIX}.event-seq"
 
-log_msg() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG_DIR/$LOG_PREFIX-$(date +%Y-%m-%d).log"
+persist_event_markers() {
+    if [[ -n "$EVENT_MARKERS" ]]; then
+        printf "%s\n" "$EVENT_MARKERS" > "$EVENT_QUEUE_FILE"
+    else
+        : > "$EVENT_QUEUE_FILE"
+    fi
 }
 
-trap 'log_msg "Logger stopped"; exit 0' SIGTERM SIGINT
+load_event_markers() {
+    if [[ -r "$EVENT_QUEUE_FILE" ]]; then
+        EVENT_MARKERS=$(cat "$EVENT_QUEUE_FILE" 2>/dev/null)
+        EVENT_MARKERS="${EVENT_MARKERS//$'\n'/}"
+    fi
+}
+
+next_event_id() {
+    local seq
+    seq=0
+    if [[ -r "$EVENT_SEQ_FILE" ]]; then
+        seq=$(cat "$EVENT_SEQ_FILE" 2>/dev/null)
+        if [[ ! "$seq" =~ ^[0-9]+$ ]]; then
+            seq=0
+        fi
+    fi
+    seq=$((seq + 1))
+    printf "%s\n" "$seq" > "$EVENT_SEQ_FILE"
+    printf "%s" "$seq"
+}
+
+enqueue_event_marker() {
+    local code="$1" event_id marker
+    event_id=$(next_event_id)
+    marker="@${code}${event_id}"
+    if [[ -n "$EVENT_MARKERS" ]]; then
+        EVENT_MARKERS="${EVENT_MARKERS},${marker}"
+    else
+        EVENT_MARKERS="${marker}"
+    fi
+    persist_event_markers
+}
+
+handle_stop() {
+    enqueue_event_marker "X"
+    exit 0
+}
+
+activate_manual_burst() {
+    local now_ms candidate_until_ms
+    ACTIVE_BURST_INTERVAL_OVERRIDE=""
+    USR2_PHASE1_UNTIL_MS=0
+    USR2_PHASE2_UNTIL_MS=0
+    now_ms=$(date +%s%3N)
+    candidate_until_ms=$((now_ms + MANUAL_BURST_DURATION_MS))
+
+    if (( MANUAL_BURST_LEVEL > ACTIVE_BURST_LEVEL )); then
+        ACTIVE_BURST_LEVEL=$MANUAL_BURST_LEVEL
+        ACTIVE_BURST_UNTIL_MS=$candidate_until_ms
+    elif (( MANUAL_BURST_LEVEL == ACTIVE_BURST_LEVEL && candidate_until_ms > ACTIVE_BURST_UNTIL_MS )); then
+        ACTIVE_BURST_UNTIL_MS=$candidate_until_ms
+    fi
+
+    enqueue_event_marker "U1"
+}
+
+activate_profile_burst_usr2() {
+    local now_ms
+    now_ms=$(date +%s%3N)
+    USR2_PHASE1_UNTIL_MS=$((now_ms + USR2_PHASE1_DURATION_MS))
+    USR2_PHASE2_UNTIL_MS=$((USR2_PHASE1_UNTIL_MS + USR2_PHASE2_DURATION_MS))
+
+    ACTIVE_BURST_LEVEL=2
+    ACTIVE_BURST_UNTIL_MS=$USR2_PHASE2_UNTIL_MS
+    ACTIVE_BURST_INTERVAL_OVERRIDE="$USR2_PHASE1_INTERVAL"
+
+    enqueue_event_marker "U2"
+}
+
+trap 'handle_stop' SIGTERM SIGINT
+trap 'activate_manual_burst' SIGUSR1
+trap 'activate_profile_burst_usr2' SIGUSR2
 
 SHOW_ACPI_EC=0
 while [[ $# -gt 0 ]]; do
@@ -107,9 +243,9 @@ rpm_to_level() {
     # User-provided RPM thresholds:
     # L1: 1500, L2: 2400, L3: 3300, L4: 4100, L5: 4800+.
     if (( rpm >= 4800 )); then printf "5"
-    elif (( rpm >= 4100 )); then printf "4"
-    elif (( rpm >= 3300 )); then printf "3"
-    elif (( rpm >= 2400 )); then printf "2"
+    elif (( rpm >= 4000 )); then printf "4"
+    elif (( rpm >= 3200 )); then printf "3"
+    elif (( rpm >= 2300 )); then printf "2"
     elif (( rpm >= 1500 )); then printf "1"
     else printf "0"
     fi
@@ -454,11 +590,10 @@ get_top_procs() {
             }'
 }
 
-log_msg "Starting system logging (CPU + Thermal + Fans)"
+load_event_markers
+enqueue_event_marker "R"
 
 LAST_CLEANUP_DATE=""
-ACTIVE_BURST_LEVEL=0
-ACTIVE_BURST_UNTIL_MS=0
 while true; do
     DATETIME=$(date '+%Y-%m-%d %H:%M:%S')
     CURRENT_DATE=${DATETIME%% *}
@@ -491,9 +626,23 @@ while true; do
     EFFECTIVE_LEVEL=$(get_effective_level_from_rpms "$FAN1_RPM" "$FAN2_RPM" "$FAN3_RPM")
     NOW_MS=$(date +%s%3N)
 
+    if (( USR2_PHASE2_UNTIL_MS > 0 )); then
+        if (( NOW_MS < USR2_PHASE1_UNTIL_MS )); then
+            ACTIVE_BURST_INTERVAL_OVERRIDE="$USR2_PHASE1_INTERVAL"
+        elif (( NOW_MS < USR2_PHASE2_UNTIL_MS )); then
+            ACTIVE_BURST_INTERVAL_OVERRIDE="$USR2_PHASE2_INTERVAL"
+        else
+            ACTIVE_BURST_INTERVAL_OVERRIDE=""
+            USR2_PHASE1_UNTIL_MS=0
+            USR2_PHASE2_UNTIL_MS=0
+            enqueue_event_marker "U2C"
+        fi
+    fi
+
     if (( NOW_MS >= ACTIVE_BURST_UNTIL_MS )); then
         ACTIVE_BURST_LEVEL=0
         ACTIVE_BURST_UNTIL_MS=0
+        ACTIVE_BURST_INTERVAL_OVERRIDE=""
     fi
 
     if (( EFFECTIVE_LEVEL >= 2 && EFFECTIVE_LEVEL <= 5 )); then
@@ -508,13 +657,37 @@ while true; do
     fi
 
     TOP_SAMPLE_DELAY="$DEFAULT_TOP_SAMPLE_DELAY"
-    if (( ACTIVE_BURST_LEVEL >= 2 && ACTIVE_BURST_LEVEL <= 5 )); then
+    if [[ -n "$ACTIVE_BURST_INTERVAL_OVERRIDE" ]]; then
+        TOP_SAMPLE_DELAY="$ACTIVE_BURST_INTERVAL_OVERRIDE"
+    elif (( ACTIVE_BURST_LEVEL >= 2 && ACTIVE_BURST_LEVEL <= 5 )); then
         TOP_SAMPLE_DELAY=$(get_burst_interval_for_level "$ACTIVE_BURST_LEVEL")
     fi
 
+    SAMPLE_START_MS=$(date +%s%3N)
     TOP_PROCS=$(get_top_procs "$TOP_SAMPLE_DELAY")
+    SAMPLE_END_MS=$(date +%s%3N)
+    SAMPLE_ELAPSED_MS=$((SAMPLE_END_MS - SAMPLE_START_MS))
+    MIN_SAMPLE_ELAPSED_MS=$((TOP_SAMPLE_DELAY * 1000 - 1000))
+    if (( MIN_SAMPLE_ELAPSED_MS < 0 )); then
+        MIN_SAMPLE_ELAPSED_MS=0
+    fi
 
-    echo "$TIMESTAMP $TOP_PROCS  $FAN_MODE$FAN_SUMMARY$TEMP_BLOCK  C= $TEMP_SUMMARY" >> "$LOG_DIR/$LOG_PREFIX-$CURRENT_DATE.log"
+    # If sampling was interrupted (for example by an external signal sent to
+    # the whole unit), skip this write and keep queued event markers for the
+    # next complete sample line.
+    if (( SAMPLE_ELAPSED_MS < MIN_SAMPLE_ELAPSED_MS )); then
+        sleep "$LOOP_SAFETY_SLEEP"
+        continue
+    fi
+
+    EVENT_SUFFIX=""
+    if [[ -n "$EVENT_MARKERS" ]]; then
+        EVENT_SUFFIX="  E=$EVENT_MARKERS"
+        EVENT_MARKERS=""
+        persist_event_markers
+    fi
+
+    echo "$TIMESTAMP $TOP_PROCS  $FAN_MODE$FAN_SUMMARY$TEMP_BLOCK  C= $TEMP_SUMMARY$EVENT_SUFFIX" >> "$LOG_DIR/$LOG_PREFIX-$CURRENT_DATE.log"
     # Safety delay prevents busy-looping if top fails or is interrupted.
     sleep "$LOOP_SAFETY_SLEEP"
 done
