@@ -1,0 +1,33 @@
+#!/bin/bash
+# cpu-epp - Set CPU Energy Performance Preference (EPP) for all policies
+# Note: Common EPP values are: power, balance_power, balance_performance, performance
+
+EPP="${1:-power}"
+
+# List of valid EPP values (common on AMD/Intel)
+VALID_EPPS=("power" "balance_power" "balance_performance" "performance")
+
+is_valid=0
+for e in "${VALID_EPPS[@]}"; do
+    if [ "$EPP" == "$e" ]; then
+        is_valid=1
+        break
+    fi
+done
+
+if [ "$is_valid" -eq 0 ]; then
+    echo "Usage: $0 [power|balance_power|balance_performance|performance]"
+    echo "Default: power"
+    echo ""
+    echo "Current settings:"
+    /home/dcar/bin/sps
+    exit 1
+fi
+
+echo "Setting CPU EPP to: $EPP"
+echo "$EPP" | sudo tee /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference > /dev/null
+
+# Show the result using sps
+if [ -x "/home/dcar/bin/sps" ]; then
+    /home/dcar/bin/sps
+fi
