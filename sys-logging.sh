@@ -40,20 +40,28 @@ LOG_PREFIX="sys-logging"
 EC_PATH="/sys/class/ec_su_axb35"
 DEFAULT_TOP_SAMPLE_DELAY=29
 LOOP_SAFETY_SLEEP=0.1
+START_EVENT_CODE="▷"
+USER_BURST_EVENT_CODE="🏃"
+BURST_EVENT_CODE="🌀"
 # Event markers are appended to the next telemetry line:
-# - R@<n>   service start
+# - ▷@<n>   service start
 # - X@<n>   service stop
-# - U1@<n>  SIGUSR1 burst request
-# - U2@<n>  SIGUSR2 profile request
-# - U2C@<n> SIGUSR2 profile complete
-# - B<sec>@<n> burst frequency set/changed (for example B5@<n>, B15@<n>)
-# - BE@<n>  burst frequency returned to default
+# - 🏃1@<n>  SIGUSR1 burst request
+# - 🏃2@<n>  SIGUSR2 profile request
+# - 🏃2C@<n> SIGUSR2 profile complete
+# - 🌀<sec>@<n> burst frequency set/changed (for example 🌀5@<n>, 🌀15@<n>)
+# - 🌀E@<n> burst frequency returned to default
+# Notes:
+# - Marker format is <code>@<sequence-id>.
+# - If X and ▷ would be emitted on the same line, X is dropped as implied by ▷.
 MANUAL_BURST_LEVEL="${MANUAL_BURST_LEVEL:-2}"
 MANUAL_BURST_DURATION_MS="${MANUAL_BURST_DURATION_MS:-120000}"
 USR2_PHASE1_INTERVAL="${USR2_PHASE1_INTERVAL:-5}"
 USR2_PHASE1_DURATION_MS="${USR2_PHASE1_DURATION_MS:-30000}"
 USR2_PHASE2_INTERVAL="${USR2_PHASE2_INTERVAL:-15}"
 USR2_PHASE2_DURATION_MS="${USR2_PHASE2_DURATION_MS:-120000}"
+STARTUP_BURST_INTERVAL="${STARTUP_BURST_INTERVAL:-15}"
+STARTUP_BURST_DURATION_MS="${STARTUP_BURST_DURATION_MS:-120000}"
 EVENT_QUEUE_FILE=""
 EVENT_SEQ_FILE=""
 EVENT_MARKERS=""
@@ -80,6 +88,14 @@ fi
 
 if [[ ! "$USR2_PHASE2_DURATION_MS" =~ ^[0-9]+$ ]] || (( USR2_PHASE2_DURATION_MS < 1000 )); then
     USR2_PHASE2_DURATION_MS=120000
+fi
+
+if [[ ! "$STARTUP_BURST_INTERVAL" =~ ^[0-9]+$ ]] || (( STARTUP_BURST_INTERVAL < 1 )); then
+    STARTUP_BURST_INTERVAL=15
+fi
+
+if [[ ! "$STARTUP_BURST_DURATION_MS" =~ ^[0-9]+$ ]] || (( STARTUP_BURST_DURATION_MS < 1000 )); then
+    STARTUP_BURST_DURATION_MS=120000
 fi
 
 ACTIVE_BURST_LEVEL=0
@@ -134,6 +150,39 @@ enqueue_event_marker() {
     persist_event_markers
 }
 
+filter_event_markers_for_output() {
+    local markers="$1"
+    local has_start=0 has_stop=0 out="" marker code
+    local marker_list=()
+
+    IFS=',' read -r -a marker_list <<< "$markers"
+    for marker in "${marker_list[@]}"; do
+        [[ -z "$marker" ]] && continue
+        code="${marker%%@*}"
+        if [[ "$code" == "$START_EVENT_CODE" ]]; then
+            has_start=1
+        elif [[ "$code" == "X" ]]; then
+            has_stop=1
+        fi
+    done
+
+    if (( has_start && has_stop )); then
+        for marker in "${marker_list[@]}"; do
+            [[ -z "$marker" ]] && continue
+            code="${marker%%@*}"
+            [[ "$code" == "X" ]] && continue
+            if [[ -n "$out" ]]; then
+                out="${out},${marker}"
+            else
+                out="$marker"
+            fi
+        done
+        printf "%s" "$out"
+    else
+        printf "%s" "$markers"
+    fi
+}
+
 handle_stop() {
     enqueue_event_marker "X"
     exit 0
@@ -154,7 +203,7 @@ activate_manual_burst() {
         ACTIVE_BURST_UNTIL_MS=$candidate_until_ms
     fi
 
-    enqueue_event_marker "U1"
+    enqueue_event_marker "${USER_BURST_EVENT_CODE}1"
 }
 
 activate_profile_burst_usr2() {
@@ -167,7 +216,7 @@ activate_profile_burst_usr2() {
     ACTIVE_BURST_UNTIL_MS=$USR2_PHASE2_UNTIL_MS
     ACTIVE_BURST_INTERVAL_OVERRIDE="$USR2_PHASE1_INTERVAL"
 
-    enqueue_event_marker "U2"
+    enqueue_event_marker "${USER_BURST_EVENT_CODE}2"
 }
 
 trap 'handle_stop' SIGTERM SIGINT
@@ -594,7 +643,10 @@ get_top_procs() {
 }
 
 load_event_markers
-enqueue_event_marker "R"
+enqueue_event_marker "$START_EVENT_CODE"
+STARTUP_NOW_MS=$(date +%s%3N)
+ACTIVE_BURST_UNTIL_MS=$((STARTUP_NOW_MS + STARTUP_BURST_DURATION_MS))
+ACTIVE_BURST_INTERVAL_OVERRIDE="$STARTUP_BURST_INTERVAL"
 
 LAST_CLEANUP_DATE=""
 while true; do
@@ -638,7 +690,7 @@ while true; do
             ACTIVE_BURST_INTERVAL_OVERRIDE=""
             USR2_PHASE1_UNTIL_MS=0
             USR2_PHASE2_UNTIL_MS=0
-            enqueue_event_marker "U2C"
+            enqueue_event_marker "${USER_BURST_EVENT_CODE}2C"
         fi
     fi
 
@@ -668,11 +720,11 @@ while true; do
 
     if (( TOP_SAMPLE_DELAY != DEFAULT_TOP_SAMPLE_DELAY )); then
         if [[ "$TOP_SAMPLE_DELAY" != "$LAST_BURST_DELAY" ]]; then
-            enqueue_event_marker "B${TOP_SAMPLE_DELAY}"
+            enqueue_event_marker "${BURST_EVENT_CODE}${TOP_SAMPLE_DELAY}"
             LAST_BURST_DELAY="$TOP_SAMPLE_DELAY"
         fi
     elif [[ -n "$LAST_BURST_DELAY" ]]; then
-        enqueue_event_marker "BE"
+        enqueue_event_marker "${BURST_EVENT_CODE}E"
         LAST_BURST_DELAY=""
     fi
 
@@ -695,7 +747,10 @@ while true; do
 
     EVENT_SUFFIX=""
     if [[ -n "$EVENT_MARKERS" ]]; then
-        EVENT_SUFFIX="  E=$EVENT_MARKERS"
+        OUTPUT_EVENT_MARKERS=$(filter_event_markers_for_output "$EVENT_MARKERS")
+        if [[ -n "$OUTPUT_EVENT_MARKERS" ]]; then
+            EVENT_SUFFIX="  $OUTPUT_EVENT_MARKERS"
+        fi
         EVENT_MARKERS=""
         persist_event_markers
     fi
