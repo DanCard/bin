@@ -41,13 +41,13 @@ EC_PATH="/sys/class/ec_su_axb35"
 DEFAULT_TOP_SAMPLE_DELAY=29
 LOOP_SAFETY_SLEEP=0.1
 # Event markers are appended to the next telemetry line:
-# - @R<n>   service start
-# - @X<n>   service stop
-# - @U1<n>  SIGUSR1 burst request
-# - @U2<n>  SIGUSR2 profile request
-# - @U2C<n> SIGUSR2 profile complete
-# - @B<sec><n> burst frequency set/changed (for example @B5<n>, @B15<n>)
-# - @BE<n>  burst frequency returned to default
+# - R@<n>   service start
+# - X@<n>   service stop
+# - U1@<n>  SIGUSR1 burst request
+# - U2@<n>  SIGUSR2 profile request
+# - U2C@<n> SIGUSR2 profile complete
+# - B<sec>@<n> burst frequency set/changed (for example B5@<n>, B15@<n>)
+# - BE@<n>  burst frequency returned to default
 MANUAL_BURST_LEVEL="${MANUAL_BURST_LEVEL:-2}"
 MANUAL_BURST_DURATION_MS="${MANUAL_BURST_DURATION_MS:-120000}"
 USR2_PHASE1_INTERVAL="${USR2_PHASE1_INTERVAL:-5}"
@@ -125,7 +125,7 @@ next_event_id() {
 enqueue_event_marker() {
     local code="$1" event_id marker
     event_id=$(next_event_id)
-    marker="@${code}${event_id}"
+    marker="${code}@${event_id}"
     if [[ -n "$EVENT_MARKERS" ]]; then
         EVENT_MARKERS="${EVENT_MARKERS},${marker}"
     else
