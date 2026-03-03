@@ -44,15 +44,15 @@ START_EVENT_CODE="▷"
 USER_BURST_EVENT_CODE="🏃"
 BURST_EVENT_CODE="🌀"
 # Event markers are appended to the next telemetry line:
-# - ▷@<n>   service start
-# - X@<n>   service stop
-# - 🏃1@<n>  SIGUSR1 burst request
-# - 🏃2@<n>  SIGUSR2 profile request
-# - 🏃2C@<n> SIGUSR2 profile complete
-# - 🌀<sec>@<n> burst frequency set/changed (for example 🌀5@<n>, 🌀15@<n>)
-# - 🌀E@<n> burst frequency returned to default
+# - ▷   service start
+# - X   service stop
+# - 🏃1  SIGUSR1 burst request
+# - 🏃2  SIGUSR2 profile request
+# - 🏃2C SIGUSR2 profile complete
+# - 🌀<sec> burst frequency set/changed (for example 🌀5, 🌀15)
+# - 🌀E burst frequency returned to default
 # Notes:
-# - Marker format is <code>@<sequence-id>.
+# - Markers are comma-separated tokens with no sequence suffix.
 # - If X and ▷ would be emitted on the same line, X is dropped as implied by ▷.
 MANUAL_BURST_LEVEL="${MANUAL_BURST_LEVEL:-2}"
 MANUAL_BURST_DURATION_MS="${MANUAL_BURST_DURATION_MS:-120000}"
@@ -63,7 +63,6 @@ USR2_PHASE2_DURATION_MS="${USR2_PHASE2_DURATION_MS:-120000}"
 STARTUP_BURST_INTERVAL="${STARTUP_BURST_INTERVAL:-15}"
 STARTUP_BURST_DURATION_MS="${STARTUP_BURST_DURATION_MS:-120000}"
 EVENT_QUEUE_FILE=""
-EVENT_SEQ_FILE=""
 EVENT_MARKERS=""
 
 if [[ ! "$MANUAL_BURST_LEVEL" =~ ^[0-9]+$ ]] || (( MANUAL_BURST_LEVEL < 0 || MANUAL_BURST_LEVEL > 5 )); then
@@ -107,7 +106,6 @@ LAST_BURST_DELAY=""
 
 mkdir -p "$LOG_DIR"
 EVENT_QUEUE_FILE="$LOG_DIR/.${LOG_PREFIX}.event-queue"
-EVENT_SEQ_FILE="$LOG_DIR/.${LOG_PREFIX}.event-seq"
 
 persist_event_markers() {
     if [[ -n "$EVENT_MARKERS" ]]; then
@@ -124,26 +122,10 @@ load_event_markers() {
     fi
 }
 
-next_event_id() {
-    local seq
-    seq=0
-    if [[ -r "$EVENT_SEQ_FILE" ]]; then
-        seq=$(cat "$EVENT_SEQ_FILE" 2>/dev/null)
-        if [[ ! "$seq" =~ ^[0-9]+$ ]]; then
-            seq=0
-        fi
-    fi
-    seq=$((seq + 1))
-    printf "%s\n" "$seq" > "$EVENT_SEQ_FILE"
-    printf "%s" "$seq"
-}
-
 enqueue_event_marker() {
-    local code="$1" event_id marker
-    event_id=$(next_event_id)
-    marker="${code}@${event_id}"
+    local marker="$1"
     if [[ -n "$EVENT_MARKERS" ]]; then
-        EVENT_MARKERS="${EVENT_MARKERS},${marker}"
+        EVENT_MARKERS="${EVENT_MARKERS} ${marker}"
     else
         EVENT_MARKERS="${marker}"
     fi
