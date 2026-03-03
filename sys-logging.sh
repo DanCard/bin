@@ -41,16 +41,20 @@ EC_PATH="/sys/class/ec_su_axb35"
 DEFAULT_TOP_SAMPLE_DELAY=29
 LOOP_SAFETY_SLEEP=0.1
 START_EVENT_CODE="▷"
+RESUME_EVENT_CODE="⚡"
 USER_BURST_EVENT_CODE="🏃"
 BURST_EVENT_CODE="🌀"
+TOP_PROCS_MIN_WIDTH=$((TOP_N * (7 + PROC_NAME_WIDTH) + ((TOP_N - 1) * 2)))
 # Event markers are appended to the next telemetry line:
 # - ▷   service start
+# - ⚡   resume detected (after suspend/wake)
 # - 🏃1  SIGUSR1 burst request
 # - 🏃1E SIGUSR1 burst complete
 # - 🏃2  SIGUSR2 profile request
 # - 🏃2C SIGUSR2 profile complete
 # - 🌀N  level-based burst frequency set/changed (N = level 2-5)
 # - 🌀E level-based burst complete
+RESUME_DETECT_GRACE_MS="${RESUME_DETECT_GRACE_MS:-10000}"
 MANUAL_BURST_LEVEL="${MANUAL_BURST_LEVEL:-2}"
 MANUAL_BURST_DURATION_MS="${MANUAL_BURST_DURATION_MS:-120000}"
 USR2_PHASE1_INTERVAL="${USR2_PHASE1_INTERVAL:-5}"
@@ -92,6 +96,10 @@ fi
 
 if [[ ! "$STARTUP_BURST_DURATION_MS" =~ ^[0-9]+$ ]] || (( STARTUP_BURST_DURATION_MS < 1000 )); then
     STARTUP_BURST_DURATION_MS=120000
+fi
+
+if [[ ! "$RESUME_DETECT_GRACE_MS" =~ ^[0-9]+$ ]] || (( RESUME_DETECT_GRACE_MS < 1000 )); then
+    RESUME_DETECT_GRACE_MS=10000
 fi
 
 ACTIVE_BURST_LEVEL=0
@@ -740,6 +748,10 @@ while true; do
     TOP_PROCS=$(get_top_procs "$TOP_SAMPLE_DELAY")
     SAMPLE_END_MS=$(date +%s%3N)
     SAMPLE_ELAPSED_MS=$((SAMPLE_END_MS - SAMPLE_START_MS))
+    RESUME_DETECT_THRESHOLD_MS=$((TOP_SAMPLE_DELAY * 1000 + RESUME_DETECT_GRACE_MS))
+    if (( SAMPLE_ELAPSED_MS > RESUME_DETECT_THRESHOLD_MS )); then
+        enqueue_event_marker "$RESUME_EVENT_CODE"
+    fi
     MIN_SAMPLE_ELAPSED_MS=$((TOP_SAMPLE_DELAY * 1000 - 1000))
     if (( MIN_SAMPLE_ELAPSED_MS < 0 )); then
         MIN_SAMPLE_ELAPSED_MS=0
@@ -749,6 +761,14 @@ while true; do
     # the whole unit), skip this write and keep queued event markers for the
     # next complete sample line.
     if (( SAMPLE_ELAPSED_MS < MIN_SAMPLE_ELAPSED_MS )); then
+        sleep "$LOOP_SAFETY_SLEEP"
+        continue
+    fi
+
+    # `top` can occasionally return partial/empty process text when a signal
+    # lands while sampling. Treat this as an interrupted sample and wait for
+    # the next scheduled line so column alignment remains stable.
+    if (( ${#TOP_PROCS} < TOP_PROCS_MIN_WIDTH )); then
         sleep "$LOOP_SAFETY_SLEEP"
         continue
     fi
