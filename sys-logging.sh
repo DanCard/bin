@@ -762,6 +762,8 @@ while true; do
     SAMPLE_ELAPSED_MS=$((SAMPLE_END_MS - SAMPLE_START_MS))
     RESUME_DETECT_THRESHOLD_MS=$((TOP_SAMPLE_DELAY * 1000 + RESUME_DETECT_GRACE_MS))
     if (( SAMPLE_ELAPSED_MS > RESUME_DETECT_THRESHOLD_MS )); then
+        # Visually separate telemetry around suspend/resume boundaries.
+        printf "\n" >> "$LOG_DIR/$LOG_PREFIX-$CURRENT_DATE.log"
         enqueue_event_marker "$RESUME_EVENT_CODE"
         RESUME_NOW_MS=$(date +%s%3N)
         RESUME_CANDIDATE_UNTIL_MS=$((RESUME_NOW_MS + RESUME_BURST_DURATION_MS))
