@@ -30,7 +30,7 @@
 
 LOG_DIR="$HOME/misc/logs"
 TOP_N=3
-TEMP_N=5
+TEMP_N=4
 TEMP_DECIMALS=0
 TEMP_LABEL_WIDTH=6
 PROC_NAME_WIDTH=15
@@ -524,18 +524,16 @@ get_temp_summary() {
 
     # Always place acpitz first (if available), then fill remaining slots
     # with hottest non-acpitz sensors.
-    local acpi_first non_acpi_sorted remain
+    local acpi_first non_acpi_sorted
     acpi_first=$(printf "%s\n" "$collected" \
         | awk -F'|' '$2 ~ /^acpitz(\/|$)/' \
         | sort -t'|' -k1,1nr \
         | head -n 1)
 
     if [[ -n "$acpi_first" ]]; then
-        remain=$((TEMP_N - 1))
         non_acpi_sorted=$(printf "%s\n" "$collected" \
             | awk -F'|' '$2 !~ /^acpitz(\/|$)/' \
-            | sort -t'|' -k1,1nr \
-            | head -n "$remain")
+            | sort -t'|' -k1,1nr)
         sorted=$(
             {
                 printf "%s\n" "$acpi_first"
@@ -543,9 +541,10 @@ get_temp_summary() {
             } | sed '/^$/d'
         )
     else
-        sorted=$(printf "%s" "$collected" | sort -t'|' -k1,1nr | head -n "$TEMP_N")
+        sorted=$(printf "%s" "$collected" | sort -t'|' -k1,1nr)
     fi
 
+    local count=0
     while IFS='|' read -r mc sensor; do
         [[ -z "$mc" ]] && continue
         local t_fmt
@@ -557,6 +556,16 @@ get_temp_summary() {
                 continue
             fi
         fi
+
+        # nvm1 1 filter: show only if less than 100°F (~37778 mC)
+        if [[ "$sensor" == "nvm1 1" ]]; then
+            if (( mc >= 37778 )); then
+                continue
+            fi
+        fi
+
+        # Already have enough items? Stop now.
+        (( count >= TEMP_N )) && break
 
         local label
 
@@ -572,11 +581,13 @@ get_temp_summary() {
         else
             t_fmt=$(printf "%4s %-*.*s" "$(format_temp_c "$mc")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
         fi
+
         if [[ -z "$out" ]]; then
             out="$t_fmt"
         else
             out="$out  $t_fmt"
         fi
+        (( count++ ))
     done <<< "$sorted"
 
     printf "%s" "$out"

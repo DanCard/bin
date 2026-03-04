@@ -1,9 +1,16 @@
 #!/home/dcar/.venvs/transcribe/bin/python
 import os
 import sys
+import torch
+import torchaudio
+import json
+import logging
+import time
+import argparse
+import subprocess
+from tqdm import tqdm
 
-# PyTorch bundles MIOpen without gfx1151 support. The amdrocm 7.11 packages
-# provide a MIOpen with gfx1151 kernels. LD_PRELOAD it before torch loads.
+# ROCm Environment Setup
 _ROCM_PATH = "/opt/rocm-7.2.0"
 _MIOPEN_SO = os.path.join(_ROCM_PATH, "lib", "libMIOpen.so.1")
 if os.path.exists(_MIOPEN_SO) and _MIOPEN_SO not in os.environ.get("LD_PRELOAD", ""):
@@ -11,318 +18,220 @@ if os.path.exists(_MIOPEN_SO) and _MIOPEN_SO not in os.environ.get("LD_PRELOAD",
     os.environ["LD_LIBRARY_PATH"] = os.path.join(_ROCM_PATH, "lib") + ":" + os.environ.get("LD_LIBRARY_PATH", "")
     os.environ["MIOPEN_SYSTEM_DB_PATH"] = "/opt/rocm-7.2.0/share/miopen/db"
     os.environ["CPATH"] = "/opt/rocm-7.2.0/include"
+    os.environ["TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL"] = "1"
+    os.environ["HSA_OVERRIDE_GFX_VERSION"] = "11.5.1"
     os.execvp(sys.executable, [sys.executable] + sys.argv)
 
-import time
-import argparse
-import subprocess
-import torch
-import json
-import logging
-import whisper
+from nemo.collections.speechlm2.models import SALM
 from pyannote.audio import Pipeline
 from pyannote.core import Segment
+from pyannote.audio.pipelines.utils.hook import ProgressHook
 
-_CUDA_USABLE = None
+MODEL_LABEL = "Qwen 2.5B"
+# Upstream model repo still includes "canary" in its official identifier.
+MODEL_REPO_ID = "nvidia/canary-qwen-2.5b"
+OUTPUT_TAG = "qwen"
 
 
-def setup_logging(audio_file, output_dir="."):
+def setup_logging(audio_file):
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    base_name = os.path.basename(audio_file)
-    log_filename = os.path.join(output_dir, f"{base_name}_{timestamp}.log")
-
+    log_filename = f"{audio_file}_{timestamp}.{OUTPUT_TAG}.log"
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_filename),
-            logging.StreamHandler(sys.stdout)
-        ],
+        handlers=[logging.FileHandler(log_filename), logging.StreamHandler(sys.stdout)],
         force=True
     )
-    logging.info(f"Logging initialized. Output saved to: {log_filename}")
     return log_filename
 
 
-def check_env():
-    if "TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL" not in os.environ:
-        os.environ["TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL"] = "1"
-
-    token = os.environ.get("HF_TOKEN")
-    if not token:
-        logging.error("Hugging Face token not found. Please set HF_TOKEN environment variable.")
-        sys.exit(1)
-    return token
+def get_output_paths(audio_file):
+    return audio_file + f".{OUTPUT_TAG}.txt", audio_file + f".{OUTPUT_TAG}.json"
 
 
-def cuda_transfer_usable():
-    """Check CUDA/ROCm tensor transfer in a subprocess to avoid hard crashes."""
-    global _CUDA_USABLE
-    if _CUDA_USABLE is not None:
-        return _CUDA_USABLE
+def print_startup_overview(audio_file, args):
+    output_txt, output_json = get_output_paths(audio_file)
+    overview_lines = [
+        "Starting transcription + speaker diarization pipeline",
+        f"Input audio: {audio_file}",
+        f"Transcription model: {MODEL_LABEL}",
+        "What this script does:",
+        "  1. Converts input audio to 16kHz mono WAV",
+        "  2. Runs speaker diarization with Pyannote",
+        "  3. Transcribes audio in chunks with the speech model",
+        "  4. Assigns speaker labels to each transcribed segment",
+        "  5. Writes final outputs to text and JSON",
+        f"Chunk size: {args.chunk_size}s",
+        f"Transcription batch size: {args.batch_size}",
+        f"Diarization batch size: {args.diarize_batch_size}",
+        f"Output text: {output_txt}",
+        f"Output JSON: {output_json}",
+    ]
+    print("\n".join(overview_lines))
 
-    probe_code = (
-        "import torch; "
-        "assert torch.cuda.is_available(); "
-        "x=torch.tensor([1.0]); "
-        "x=x.to('cuda'); "
-        "print('ok')"
-    )
-    probe = subprocess.run(
-        [sys.executable, "-c", probe_code],
-        capture_output=True,
-        text=True,
-    )
-    _CUDA_USABLE = probe.returncode == 0 and "ok" in probe.stdout
-    if not _CUDA_USABLE:
-        logging.warning(
-            "CUDA/ROCm probe failed (rc=%s). Falling back to CPU to avoid segmentation faults. stderr: %s",
-            probe.returncode,
-            (probe.stderr or "").strip(),
-        )
-    return _CUDA_USABLE
-
-
-def format_time(seconds):
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = seconds % 60
-    return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
-
-
-def preprocess_audio(input_path, output_dir="."):
-    base_name = os.path.basename(input_path)
-    output_wav = os.path.join(output_dir, base_name + ".tmp.wav")
-    logging.info(f"Preprocessing audio to 16kHz mono WAV: {output_wav}")
-
+def preprocess_audio(input_path):
+    output_wav = input_path + ".tmp.wav"
+    logging.info(f"Preprocessing audio to 16kHz mono WAV (fixing sample counts): {output_wav}")
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
         "-ar", "16000", "-ac", "1",
         output_wav
     ]
-
     try:
         subprocess.run(cmd, check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
         logging.error(f"FFmpeg conversion failed: {e.stderr.decode()}")
         sys.exit(1)
-
     return output_wav
-
-
-def transcribe_audio(audio_path, model_size="large-v3", device="cuda", fp16=False):
-    cache_file = audio_path + ".whisper.json"
-    if os.path.exists(cache_file):
-        logging.info(f"Found cached transcription at {cache_file}. Loading...")
-        with open(cache_file, "r") as f:
-            return json.load(f)
-
-    logging.info(f"Loading Whisper model: {model_size} on {device} (fp16={fp16})...")
-    try:
-        model = whisper.load_model(model_size, device=device)
-    except Exception as e:
-        logging.warning(f"Failed to load on {device}. Error: {e}")
-        raise e
-
-    logging.info("Starting transcription...")
-    # openai-whisper doesn't officially support batching in .transcribe
-    result = model.transcribe(audio_path, word_timestamps=True, verbose=True, fp16=fp16)
-
-    segments = result["segments"]
-    language = result.get("language", "unknown")
-
-    logging.info(f"Transcription complete. Detected language: {language}")
-
-    logging.info(f"Caching transcription segments to {cache_file}")
-    with open(cache_file, "w") as f:
-        json.dump(segments, f, indent=2)
-
-    return segments
-
 
 def diarize_audio(audio_path, token, device="cuda", batch_size=32):
     cache_file = audio_path + ".diarize.json"
-    if os.path.exists(cache_file):
-        logging.info(f"Found cached diarization at {cache_file}. Loading...")
-        from pyannote.core import Annotation, Segment
-        annotation = Annotation()
-        with open(cache_file, "r") as f:
-            data = json.load(f)
-            for item in data:
-                annotation[Segment(item['start'], item['end'])] = item['speaker']
-        return annotation
-
-    logging.info(f"Loading Pyannote pipeline (batch_size={batch_size})...")
-    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
-
-    torch_device = torch.device(device)
-    pipeline.to(torch_device)
+    # If the original file has a cache, we can use it, but usually best to re-run or point to the same cache
+    # Check for cache based on the original audio name (without .tmp.wav)
+    original_audio = audio_path.replace(".tmp.wav", "")
+    orig_cache = original_audio + ".diarize.json"
     
-    # Set batch sizes for parallelization
+    if os.path.exists(orig_cache):
+        logging.info(f"Loading cached diarization from {orig_cache}")
+        with open(orig_cache, "r") as f:
+            return json.load(f)
+
+    logging.info("Initializing Pyannote 3.1 for diarization...")
+    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
+    pipeline.to(torch.device(device))
+    
     pipeline.segmentation_batch_size = batch_size
     pipeline.embedding_batch_size = batch_size
-
-    logging.info("Starting diarization...")
-    from pyannote.audio.pipelines.utils.hook import ProgressHook
+    
+    logging.info(f"Starting diarization (on {device}) with batch_size={batch_size}.")
     with ProgressHook() as hook:
-        result = pipeline(audio_path, hook=hook)
-
-    # In pyannote-audio 4.0+, the pipeline returns a DiarizeOutput object
-    diarization = getattr(result, "speaker_diarization", result)
-
-    logging.info("Diarization complete.")
-
-    logging.info(f"Caching diarization to {cache_file}")
+        output = pipeline(audio_path, hook=hook)
+    
+    diarization = getattr(output, "speaker_diarization", output)
+    
     cache_data = []
     for turn, _, speaker in diarization.itertracks(yield_label=True):
-        cache_data.append({
-            "start": turn.start,
-            "end": turn.end,
-            "speaker": speaker
-        })
-    with open(cache_file, "w") as f:
+        cache_data.append({"start": turn.start, "end": turn.end, "speaker": speaker})
+    
+    with open(orig_cache, "w") as f:
         json.dump(cache_data, f, indent=2)
+    
+    return cache_data
 
-    return diarization
-
-
-def merge_results(whisper_segments, diarization):
-    logging.info("Merging transcription and diarization...")
-    with open(output_txt, "w") as f:
-        for item in result:
-            line = f"[{format_time(item['start])} --> {format_time(item['end])}] {item['speaker]}: {item['text']}"
-            f.write(line + "\n")
-            print(line)
-        start_time = seg['start']
-        end_time = seg['end']
-        text = seg['text'].strip()
-
-        whisper_seg = Segment(start_time, end_time)
-
-        # Find overlapping diarization segments
-        speakers = []
-        for turn, _, speaker in diarization.itertracks(yield_label=True):
-            overlap = whisper_seg & turn
-            if overlap:
-                speakers.append((speaker, overlap.duration))
-
-        # Assign speaker with max overlap
-        if speakers:
-            best_speaker = max(speakers, key=lambda x: x[1])[0]
-        else:
-            best_speaker = "Unknown"
-
-        final_output.append({
-            "start": start_time,
-            "end": end_time,
-            "speaker": best_speaker,
-            "text": text
-        })
-
-    return final_output
-
+def get_speaker_for_chunk(start, end, diarization):
+    overlaps = {}
+    chunk_seg = Segment(start, end)
+    for entry in diarization:
+        turn = Segment(entry['start'], entry['end'])
+        overlap = chunk_seg & turn
+        if overlap.duration > 0:
+            spk = entry['speaker']
+            overlaps[spk] = overlaps.get(spk, 0) + overlap.duration
+    
+    if not overlaps:
+        return "Unknown"
+    return max(overlaps, key=overlaps.get)
 
 def main():
-    parser = argparse.ArgumentParser(description="Transcribe and Diarize Audio")
-    parser.add_argument("audio_file", help="Path to the input audio file")
-    parser.add_argument("--fp16", action="store_true", help="Enable FP16 inference (default is FP32)")
-    parser.add_argument("--output-dir", help="Directory to save outputs and cache files", default=".")
-    parser.add_argument("--batch-size", type=int, default=32, help="Batch size for diarization phases")
-    parser.add_argument(
-        "--device",
-        choices=["auto", "cuda", "cpu"],
-        default="auto",
-        help="Inference device (default: auto). Auto uses CUDA only if a transfer probe is stable.",
-    )
+    parser = argparse.ArgumentParser(description="Transcribe and diarize audio using a speech model and Pyannote")
+    parser.add_argument("audio_file", help="Input audio file")
+    parser.add_argument("--chunk_size", type=int, default=30, help="Chunk size in seconds")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size for transcription")
+    parser.add_argument("--diarize_batch_size", type=int, default=32, help="Batch size for diarization")
+    parser.add_argument("--hf_token", help="HuggingFace token for Pyannote")
     args = parser.parse_args()
 
-    audio_file = args.audio_file
-    output_dir = args.output_dir
-
-    if not os.path.exists(audio_file):
-        logging.error(f"File not found: {audio_file}")
+    audio_file = os.path.abspath(args.audio_file)
+    hf_token = args.hf_token or os.environ.get("HF_TOKEN")
+    print_startup_overview(audio_file, args)
+    
+    if not hf_token:
+        print("Error: HF_TOKEN not found. Required for Pyannote diarization.")
         sys.exit(1)
 
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    setup_logging(audio_file)
+    
+    # 0. Preprocess to WAV (Crucial for sample count consistency)
+    wav_file = preprocess_audio(audio_file)
 
-    log_file = setup_logging(audio_file, output_dir)
+    try:
+        # 1. Diarization
+        diarization_data = diarize_audio(wav_file, hf_token, batch_size=args.diarize_batch_size)
 
-    hf_token = check_env()
+        # 2. Transcription
+        logging.info(f"Loading {MODEL_LABEL} transcription model...")
+        model = SALM.from_pretrained(MODEL_REPO_ID, cache_dir='/home/dcar/llms/')
+        model = model.to("cuda").half().eval()
 
-    if args.device == "cpu":
-        device = "cpu"
-    elif args.device == "cuda":
-        device = "cuda"
-    else:
-        device = "cuda" if cuda_transfer_usable() else "cpu"
-    logging.info(f"Using inference device: {device}")
+        logging.info(f"Loading and resampling audio for transcription...")
+        audio, sr = torchaudio.load(wav_file)
+        # WAV is already 16kHz mono, but we check just in case
+        if audio.shape[0] > 1: audio = torch.mean(audio, dim=0, keepdim=True)
+        if sr != 16000:
+            resampler = torchaudio.transforms.Resample(sr, 16000)
+            audio = resampler(audio)
+        audio = audio.squeeze(0)
+        
+        chunk_samples = args.chunk_size * 16000
+        total_samples = audio.shape[0]
+        final_output = []
+        text_lines = []
 
-    fp16 = args.fp16
-    if device == "cpu" and fp16:
-        logging.warning("FP16 requested on CPU; disabling FP16.")
-        fp16 = False
+        logging.info(f"Transcribing with batch_size={args.batch_size}...")
+        
+        for i in tqdm(range(0, total_samples, chunk_samples * args.batch_size), desc="Transcribing"):
+            batch_chunks = []
+            batch_lens = []
+            batch_metadata = []
+            
+            for j in range(args.batch_size):
+                start_idx = i + (j * chunk_samples)
+                if start_idx >= total_samples: break
+                
+                end_idx = min(start_idx + chunk_samples, total_samples)
+                chunk = audio[start_idx : end_idx]
+                if chunk.shape[0] < 1600: continue
+                
+                if chunk.shape[0] < chunk_samples:
+                    padding = torch.zeros(chunk_samples - chunk.shape[0])
+                    padded_chunk = torch.cat([chunk, padding])
+                    batch_chunks.append(padded_chunk)
+                else:
+                    batch_chunks.append(chunk)
+                    
+                batch_lens.append(chunk.shape[0])
+                batch_metadata.append({"start": start_idx / 16000, "end": end_idx / 16000})
+                
+            if not batch_chunks: continue
+            
+            batch_gpu = torch.stack(batch_chunks).cuda().half()
+            batch_lens_gpu = torch.tensor(batch_lens, device="cuda")
+            prompts = [[{"role": "user", "content": f"Transcribe the following: {model.audio_locator_tag}", "audio": []}]] * len(batch_chunks)
+            
+            with torch.no_grad():
+                output_ids = model.generate(prompts=prompts, audios=batch_gpu, audio_lens=batch_lens_gpu, max_new_tokens=256)
+            
+            for idx, ids in enumerate(output_ids):
+                text = model.tokenizer.ids_to_text(ids.cpu()).strip()
+                meta = batch_metadata[idx]
+                if text:
+                    speaker = get_speaker_for_chunk(meta['start'], meta['end'], diarization_data)
+                    final_output.append({"start": meta['start'], "end": meta['end'], "speaker": speaker, "text": text})
+                    text_lines.append(f"[{speaker} {meta['start']:.1f}-{meta['end']:.1f}]: {text}")
 
-    # Preprocess
-    working_file = preprocess_audio(audio_file, output_dir)
+        # Save results
+        output_txt, output_json = get_output_paths(audio_file)
+        with open(output_txt, "w") as f:
+            f.write("\n".join(text_lines))
+        with open(output_json, "w") as f:
+            json.dump(final_output, f, indent=2)
+        
+        logging.info(f"Process complete! Output: {output_txt}")
 
-    start_total = time.time()
-
-    # 1. Transcribe
-    start_transcribe = time.time()
-    whisper_segments = transcribe_audio(working_file, device=device, fp16=fp16)
-    time_transcribe = time.time() - start_transcribe
-
-    # 2. Diarize
-    start_diarize = time.time()
-    diarization_result = diarize_audio(working_file, hf_token, device=device, batch_size=args.batch_size)
-    time_diarize = time.time() - start_diarize
-
-    # 3. Merge
-    start_merge = time.time()
-    result = merge_results(whisper_segments, diarization_result)
-    time_merge = time.time() - start_merge
-
-    # 4. Output
-    base_name = os.path.basename(audio_file)
-    output_txt = os.path.join(output_dir, base_name + ".txt")
-    output_json = os.path.join(output_dir, base_name + ".json")
-
-    logging.info(f"Saving results to {output_txt} and {output_json}...")
-
-    with open(output_txt, "w") as f:
-        for item in result:
-            line = f"[{format_time(item['start'])} --> {format_time(item['end'])}] {item['speaker']}: {item['text']}"
-            f.write(line + "
-")
-            print(line)
-
-    with open(output_json, "w") as f:
-        json.dump(result, f, indent=2)
-
-    total_time = time.time() - start_total
-
-    print("
-" + "="*40)
-    print("       PERFORMANCE SUMMARY")
-    print("="*40)
-    print(f"Transcription : {format_time(time_transcribe)}")
-    print(f"Diarization   : {format_time(time_diarize)}")
-    print(f"Merging       : {format_time(time_merge)}")
-    print("-" * 40)
-    print(f"Total Time    : {format_time(total_time)}")
-    print("="*40 + "
-")
-
-    logging.info("Done.")
-
-    # Cleanup temp WAV
-    if os.path.exists(working_file):
-        os.remove(working_file)
-
-    # Force clean exit to avoid "corrupted fastbins" crash from mixed ROCm library versions
-    os._exit(0)
-
+    finally:
+        if os.path.exists(wav_file):
+            logging.info(f"Cleaning up temporary file: {wav_file}")
+            os.remove(wav_file)
 
 if __name__ == "__main__":
     main()

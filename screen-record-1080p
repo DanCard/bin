@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "Error: ffmpeg is not installed or not in PATH." >&2
+  exit 1
+fi
+
+if ! command -v xdpyinfo >/dev/null 2>&1; then
+  echo "Error: xdpyinfo is required to detect screen size on X11." >&2
+  exit 1
+fi
+
+DISPLAY_ID="${DISPLAY:-:0}"
+SCREEN_SIZE="$(xdpyinfo | awk '/dimensions:/ { print $2; exit }')"
+FPS="${FPS:-60}"
+
+OUT_DIR="${HOME}/Videos"
+mkdir -p "${OUT_DIR}"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+OUT_FILE="${1:-${OUT_DIR}/screen-1080p-${TIMESTAMP}.mkv}"
+
+echo "Recording display ${DISPLAY_ID} at ${SCREEN_SIZE} -> 1080p"
+echo "Output: ${OUT_FILE}"
+echo "Press 'q' to stop recording."
+
+ffmpeg -hide_banner -loglevel warning -stats \
+  -f x11grab \
+  -framerate "${FPS}" \
+  -video_size "${SCREEN_SIZE}" \
+  -i "${DISPLAY_ID}+0,0" \
+  -vf "scale=-2:1080:flags=lanczos,format=yuv420p" \
+  -c:v libx264 \
+  -preset veryfast \
+  -crf 20 \
+  "${OUT_FILE}"
