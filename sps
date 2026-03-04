@@ -65,7 +65,8 @@ WHITE='\033[38;2;255;225;255m'
 NC='\033[0m' # No Color
 
 # COMPRESSED OUTPUT
-echo -e "${CYAN}PERFORMANCE: Gov: $cpu_gov  EPP: $cpu_epp  GPU: $gpu_perf  SCLK: $gpu_sclk  MCLK: $gpu_mclk"
+echo -e "${CYAN}PERFORMANCE: Gov: $cpu_gov  EPP: $cpu_epp"
+#  GPU: $gpu_perf  SCLK: $gpu_sclk  MCLK: $gpu_mclk"
 #  EC (embedded controller) APU power policy: $apu_mode${NC}"
 echo -e "${YELLOW}SCREEN:      Sleep: $(format_time "$dpms_s")  Off: $(format_time "$dpms_o")  DPMS: $([ "$dpms_enabled" = "1" ] && echo "On" || echo "OFF")${NC}"
 echo -e "${WHITE}SUSPEND:     Timeout: $(format_time "$inact")  Lock: $(format_bool "$lock")${NC}"
