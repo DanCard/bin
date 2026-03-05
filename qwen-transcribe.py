@@ -24,13 +24,12 @@ if os.path.exists(_MIOPEN_SO) and _MIOPEN_SO not in os.environ.get("LD_PRELOAD",
 
 from nemo.collections.speechlm2.models import SALM
 from pyannote.audio import Pipeline
-from pyannote.core import Segment
 from pyannote.audio.pipelines.utils.hook import ProgressHook
 
 MODEL_LABEL = "Qwen 2.5B"
 # Upstream model repo still includes "canary" in its official identifier.
 MODEL_REPO_ID = "nvidia/canary-qwen-2.5b"
-OUTPUT_TAG = "qwen"
+OUTPUT_TAG = "qwen-turns"
 
 
 def setup_logging(audio_file):
@@ -52,16 +51,20 @@ def get_output_paths(audio_file):
 def print_startup_overview(audio_file, args):
     output_txt, output_json = get_output_paths(audio_file)
     overview_lines = [
-        "Starting transcription + speaker diarization pipeline",
+        "Starting per-turn transcription + speaker diarization pipeline",
         f"Input audio: {audio_file}",
         f"Transcription model: {MODEL_LABEL}",
         "What this script does:",
         "  1. Converts input audio to 16kHz mono WAV",
         "  2. Runs speaker diarization with Pyannote",
-        "  3. Transcribes audio in chunks with the speech model",
-        "  4. Assigns speaker labels to each transcribed segment",
-        "  5. Writes final outputs to text and JSON",
-        f"Chunk size: {args.chunk_size}s",
+        "  3. Builds transcription units directly from diarization turns",
+        "  4. Transcribes each turn (split if too long)",
+        "  5. Uses diarization speaker labels directly",
+        "  6. Writes final outputs to text and JSON",
+        f"Max per-turn chunk size: {args.chunk_size}s",
+        f"Turn padding: {args.turn_padding}s",
+        f"Min chunk duration: {args.min_chunk_size}s",
+        f"Force re-diarize: {args.force_diarize}",
         f"Transcription batch size: {args.batch_size}",
         f"Diarization batch size: {args.diarize_batch_size}",
         f"Output text: {output_txt}",
@@ -84,14 +87,14 @@ def preprocess_audio(input_path):
         sys.exit(1)
     return output_wav
 
-def diarize_audio(audio_path, token, device="cuda", batch_size=32):
+def diarize_audio(audio_path, token, device="cuda", batch_size=32, force=False):
     cache_file = audio_path + ".diarize.json"
     # If the original file has a cache, we can use it, but usually best to re-run or point to the same cache
     # Check for cache based on the original audio name (without .tmp.wav)
     original_audio = audio_path.replace(".tmp.wav", "")
     orig_cache = original_audio + ".diarize.json"
     
-    if os.path.exists(orig_cache):
+    if os.path.exists(orig_cache) and not force:
         logging.info(f"Loading cached diarization from {orig_cache}")
         with open(orig_cache, "r") as f:
             return json.load(f)
@@ -118,28 +121,70 @@ def diarize_audio(audio_path, token, device="cuda", batch_size=32):
     
     return cache_data
 
-def get_speaker_for_chunk(start, end, diarization):
-    overlaps = {}
-    chunk_seg = Segment(start, end)
-    for entry in diarization:
-        turn = Segment(entry['start'], entry['end'])
-        overlap = chunk_seg & turn
-        if overlap.duration > 0:
-            spk = entry['speaker']
-            overlaps[spk] = overlaps.get(spk, 0) + overlap.duration
-    
-    if not overlaps:
-        return "Unknown"
-    return max(overlaps, key=overlaps.get)
+
+def build_turn_chunks(total_duration, diarization, turn_padding, max_chunk_size, min_chunk_size):
+    """
+    Build transcription chunks directly from diarization turns.
+    Small padding gives the model context; overlap is removed to prevent duplicate coverage.
+    """
+    sorted_turns = sorted(diarization, key=lambda entry: (float(entry["start"]), float(entry["end"])))
+    padded_turns = []
+    for entry in sorted_turns:
+        raw_start = max(0.0, min(float(total_duration), float(entry["start"])))
+        raw_end = max(0.0, min(float(total_duration), float(entry["end"])))
+        if raw_end <= raw_start:
+            continue
+
+        start = max(0.0, raw_start - turn_padding)
+        end = min(float(total_duration), raw_end + turn_padding)
+        if end - start < min_chunk_size:
+            continue
+
+        padded_turns.append({"start": start, "end": end, "speaker": entry["speaker"]})
+
+    # Remove overlaps created by padding by splitting overlap at midpoint.
+    for idx in range(len(padded_turns) - 1):
+        left = padded_turns[idx]
+        right = padded_turns[idx + 1]
+        if left["end"] > right["start"]:
+            midpoint = 0.5 * (left["end"] + right["start"])
+            left["end"] = midpoint
+            right["start"] = midpoint
+
+    chunks = []
+    for turn in padded_turns:
+        if turn["end"] - turn["start"] < min_chunk_size:
+            continue
+
+        current_start = turn["start"]
+        while current_start < turn["end"]:
+            current_end = min(current_start + max_chunk_size, turn["end"])
+            if current_end - current_start >= min_chunk_size:
+                chunks.append({"start": current_start, "end": current_end, "speaker": turn["speaker"]})
+            current_start = current_end
+
+    return chunks
 
 def main():
-    parser = argparse.ArgumentParser(description="Transcribe and diarize audio using a speech model and Pyannote")
+    parser = argparse.ArgumentParser(description="Transcribe diarization turns using a speech model and Pyannote")
     parser.add_argument("audio_file", help="Input audio file")
-    parser.add_argument("--chunk_size", type=int, default=30, help="Chunk size in seconds")
+    parser.add_argument("--chunk_size", type=float, default=8.0, help="Max per-turn chunk size in seconds")
+    parser.add_argument("--turn_padding", type=float, default=0.15, help="Padding around each diarization turn (seconds)")
+    parser.add_argument("--min_chunk_size", type=float, default=0.20, help="Skip chunks shorter than this duration (seconds)")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for transcription")
     parser.add_argument("--diarize_batch_size", type=int, default=32, help="Batch size for diarization")
+    parser.add_argument("--force-diarize", action="store_true", help="Ignore diarization cache and recompute")
     parser.add_argument("--hf_token", help="HuggingFace token for Pyannote")
     args = parser.parse_args()
+    if args.chunk_size <= 0:
+        print("Error: --chunk_size must be greater than 0.")
+        sys.exit(1)
+    if args.turn_padding < 0:
+        print("Error: --turn_padding cannot be negative.")
+        sys.exit(1)
+    if args.min_chunk_size <= 0:
+        print("Error: --min_chunk_size must be greater than 0.")
+        sys.exit(1)
 
     audio_file = os.path.abspath(args.audio_file)
     hf_token = args.hf_token or os.environ.get("HF_TOKEN")
@@ -156,7 +201,12 @@ def main():
 
     try:
         # 1. Diarization
-        diarization_data = diarize_audio(wav_file, hf_token, batch_size=args.diarize_batch_size)
+        diarization_data = diarize_audio(
+            wav_file,
+            hf_token,
+            batch_size=args.diarize_batch_size,
+            force=args.force_diarize,
+        )
 
         # 2. Transcription
         logging.info(f"Loading {MODEL_LABEL} transcription model...")
@@ -172,23 +222,31 @@ def main():
             audio = resampler(audio)
         audio = audio.squeeze(0)
         
-        chunk_samples = args.chunk_size * 16000
         total_samples = audio.shape[0]
+        total_duration = total_samples / 16000.0
+        chunk_samples = int(args.chunk_size * 16000)
+        transcription_chunks = build_turn_chunks(
+            total_duration,
+            diarization_data,
+            turn_padding=args.turn_padding,
+            max_chunk_size=args.chunk_size,
+            min_chunk_size=args.min_chunk_size,
+        )
         final_output = []
         text_lines = []
 
-        logging.info(f"Transcribing with batch_size={args.batch_size}...")
+        logging.info(
+            f"Transcribing {len(transcription_chunks)} diarization-turn chunks with batch_size={args.batch_size}..."
+        )
         
-        for i in tqdm(range(0, total_samples, chunk_samples * args.batch_size), desc="Transcribing"):
+        for i in tqdm(range(0, len(transcription_chunks), args.batch_size), desc="Transcribing"):
             batch_chunks = []
             batch_lens = []
             batch_metadata = []
             
-            for j in range(args.batch_size):
-                start_idx = i + (j * chunk_samples)
-                if start_idx >= total_samples: break
-                
-                end_idx = min(start_idx + chunk_samples, total_samples)
+            for meta in transcription_chunks[i : i + args.batch_size]:
+                start_idx = int(meta["start"] * 16000)
+                end_idx = min(int(meta["end"] * 16000), total_samples)
                 chunk = audio[start_idx : end_idx]
                 if chunk.shape[0] < 1600: continue
                 
@@ -200,7 +258,7 @@ def main():
                     batch_chunks.append(chunk)
                     
                 batch_lens.append(chunk.shape[0])
-                batch_metadata.append({"start": start_idx / 16000, "end": end_idx / 16000})
+                batch_metadata.append(meta)
                 
             if not batch_chunks: continue
             
@@ -215,9 +273,8 @@ def main():
                 text = model.tokenizer.ids_to_text(ids.cpu()).strip()
                 meta = batch_metadata[idx]
                 if text:
-                    speaker = get_speaker_for_chunk(meta['start'], meta['end'], diarization_data)
-                    final_output.append({"start": meta['start'], "end": meta['end'], "speaker": speaker, "text": text})
-                    text_lines.append(f"[{speaker} {meta['start']:.1f}-{meta['end']:.1f}]: {text}")
+                    final_output.append({"start": meta["start"], "end": meta["end"], "speaker": meta["speaker"], "text": text})
+                    text_lines.append(f"[{meta['speaker']} {meta['start']:.1f}-{meta['end']:.1f}]: {text}")
 
         # Save results
         output_txt, output_json = get_output_paths(audio_file)

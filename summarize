@@ -181,7 +181,7 @@ def create_google_doc(file_path):
         )
         
         # Run gemini command without shell=True for safety
-        subprocess.run(["gemini", prompt], check=True)
+        subprocess.run(["gemini", "--approval-mode", "auto_edit", prompt], check=True)
         print(f"✅ Google Doc creation request sent.")
 
     except subprocess.CalledProcessError as e:
