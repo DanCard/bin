@@ -54,7 +54,7 @@ TOP_PROCS_MIN_WIDTH=$((TOP_N * (7 + PROC_NAME_WIDTH) + ((TOP_N - 1) * 2)))
 # - 🏃2C SIGUSR2 profile complete
 # - 🌀N  level-based burst frequency set/changed (N = level 2-5)
 # - 🌀E level-based burst complete
-RESUME_DETECT_GRACE_MS="${RESUME_DETECT_GRACE_MS:-10000}"
+RESUME_DETECT_GRACE_MS="${RESUME_DETECT_GRACE_MS:-30000}"
 MANUAL_BURST_LEVEL="${MANUAL_BURST_LEVEL:-2}"
 MANUAL_BURST_DURATION_MS="${MANUAL_BURST_DURATION_MS:-120000}"
 USR2_PHASE1_INTERVAL="${USR2_PHASE1_INTERVAL:-5}"
@@ -129,7 +129,7 @@ if [[ ! "$RESUME_PHASE3_DURATION_MS" =~ ^[0-9]+$ ]] || (( RESUME_PHASE3_DURATION
 fi
 
 if [[ ! "$RESUME_DETECT_GRACE_MS" =~ ^[0-9]+$ ]] || (( RESUME_DETECT_GRACE_MS < 1000 )); then
-    RESUME_DETECT_GRACE_MS=10000
+    RESUME_DETECT_GRACE_MS=30000
 fi
 
 ACTIVE_BURST_LEVEL=0
@@ -146,6 +146,8 @@ USR1_BURST_UNTIL_MS=0
 LAST_USR1_ACTIVE=0
 
 mkdir -p "$LOG_DIR"
+# Separate past and present logs if the log file already exists.
+[[ -s "$LOG_DIR/$LOG_PREFIX-$(date '+%Y-%m-%d').log" ]] && printf "\n" >> "$LOG_DIR/$LOG_PREFIX-$(date '+%Y-%m-%d').log"
 EVENT_QUEUE_FILE="$LOG_DIR/.${LOG_PREFIX}.event-queue"
 
 persist_event_markers() {
@@ -576,16 +578,16 @@ get_temp_summary() {
         fi
 
         if [[ "$sensor" != acpitz* ]] && (( first_non_acpi )); then
-            t_fmt=$(printf "%4s %3d°F %-*.*s" "$(format_temp_c "$mc")" "$(( (mc * 9 / 5 + 32000) / 1000 ))" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
+            t_fmt=$(printf "%5s %3d°F %-*.*s" "$(format_temp_c "$mc")" "$(( (mc * 9 / 5 + 32000) / 1000 ))" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
             first_non_acpi=0
         else
-            t_fmt=$(printf "%4s %-*.*s" "$(format_temp_c "$mc")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
+            t_fmt=$(printf "%5s %-*.*s" "$(format_temp_c "$mc")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
         fi
 
         if [[ -z "$out" ]]; then
             out="$t_fmt"
         else
-            out="$out  $t_fmt"
+            out="$out $t_fmt"
         fi
         (( count++ ))
     done <<< "$sorted"

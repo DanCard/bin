@@ -54,6 +54,12 @@
 #                     - `--self-test` generates calibration audio (no Signal call needed).
 #                     - Runs through same mix/filter/encoder chain.
 #                     - Prints PASS/FAIL for loudness and channel balance.
+#   v1.8  2026-03-06  Fix low volume to match record-call.sh levels.
+#                     - Increased default gain from 12 dB to 22 dB based on actual measurements.
+#                     - Signal recordings now ~-25 dB mean (same as record-call.sh).
+#   v1.9  2026-03-07  Fix keyboard typing noise by isolating gain.
+#                     - Apply SIGNAL_MIX_GAIN_DB only to Signal input [0:a].
+#                     - Mic input [1:a] remains at unity gain, making it ~22dB quieter.
 
 # --- Hardware-specific device names (from `pactl list short sinks/sources`) ---
 SPEAKER="alsa_output.pci-0000_c6_00.6.analog-stereo"          # Built-in speakers
@@ -63,7 +69,7 @@ VIRTUAL_SINK="signal_sink"  # Name for the virtual sink we create
 
 # Tunable output gain for Signal-isolated recordings (override per run if needed):
 #   SIGNAL_MIX_GAIN_DB=10 signal-record.sh
-SIGNAL_MIX_GAIN_DB="${SIGNAL_MIX_GAIN_DB:-12}"
+SIGNAL_MIX_GAIN_DB="${SIGNAL_MIX_GAIN_DB:-22}"
 # Self-test recording length in seconds (override per run if needed):
 #   SIGNAL_SELF_TEST_SECONDS=30 signal-record.sh --self-test
 SIGNAL_SELF_TEST_SECONDS="${SIGNAL_SELF_TEST_SECONDS:-25}"
@@ -229,7 +235,7 @@ print_self_test_report() {
     echo "------------------------------------------------"
 }
 
-MIX_FILTER="[0:a][1:a]amix=inputs=2:duration=longest:normalize=0,volume=${SIGNAL_MIX_GAIN_DB}dB,alimiter=limit=0.95,pan=stereo|c0=c0|c1=c0"
+MIX_FILTER="[0:a]volume=${SIGNAL_MIX_GAIN_DB}dB[sig];[sig][1:a]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.95,pan=stereo|c0=c0|c1=c0"
 
 if [ "$SELF_TEST" -eq 1 ]; then
     echo "------------------------------------------------"
