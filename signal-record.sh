@@ -146,6 +146,10 @@ fi
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 OUTFILE="${NAME}-${TIMESTAMP}.m4a"
 
+if [ "${INHIBIT_SLEEP_ACTIVE:-0}" != "1" ] && command -v inhibit-sleep >/dev/null 2>&1; then
+    exec inhibit-sleep "$0" "$@"
+fi
+
 # Track what we set up so cleanup only undoes what we did
 LOADED_EC=0
 LOADED_SINK=0

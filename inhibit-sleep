@@ -1,0 +1,44 @@
+#!/bin/bash
+
+set -u
+
+SLEEP_GUARD_ENV="INHIBIT_SLEEP_ACTIVE"
+XFCE_SLEEP_TIMEOUT_MINUTES=120
+XFCE_SLEEP_PROPERTY="/xfce4-power-manager/inactivity-on-ac"
+
+if [ $# -eq 0 ]; then
+    echo "Usage: $(basename "$0") <command> [args...]" >&2
+    exit 1
+fi
+
+if [ "${!SLEEP_GUARD_ENV:-0}" = "1" ]; then
+    exec "$@"
+fi
+
+if command -v systemd-inhibit >/dev/null 2>&1; then
+    export "$SLEEP_GUARD_ENV"=1
+    exec systemd-inhibit \
+        --what=sleep:idle \
+        --who="$(basename "$1")" \
+        --why="Prevent system sleep while the wrapped command runs" \
+        "$@"
+fi
+
+restore_timeout() {
+    if [ -n "${ORIGINAL_XFCE_TIMEOUT:-}" ]; then
+        xfconf-query -c xfce4-power-manager -p "$XFCE_SLEEP_PROPERTY" -s "$ORIGINAL_XFCE_TIMEOUT" >/dev/null 2>&1 || true
+    fi
+}
+
+if command -v xfconf-query >/dev/null 2>&1; then
+    CURRENT_TIMEOUT="$(xfconf-query -c xfce4-power-manager -p "$XFCE_SLEEP_PROPERTY" 2>/dev/null || true)"
+    if [[ "$CURRENT_TIMEOUT" =~ ^[0-9]+$ ]] && [ "$CURRENT_TIMEOUT" -ne 0 ] && [ "$CURRENT_TIMEOUT" -le "$XFCE_SLEEP_TIMEOUT_MINUTES" ]; then
+        ORIGINAL_XFCE_TIMEOUT="$CURRENT_TIMEOUT"
+        trap restore_timeout EXIT
+        xfconf-query -c xfce4-power-manager -p "$XFCE_SLEEP_PROPERTY" -s "$XFCE_SLEEP_TIMEOUT_MINUTES" >/dev/null
+    fi
+fi
+
+export "$SLEEP_GUARD_ENV"=1
+"$@"
+exit $?

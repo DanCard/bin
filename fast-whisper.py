@@ -25,9 +25,7 @@ from pyannote.core import Segment
 
 _WHISPER_MODULE = None
 FILE_TAG = "fast-whisper"
-SLEEP_INHIBIT_ENV = "TRANSCRIBE_SLEEP_INHIBITED"
-XFCE_SLEEP_TIMEOUT_MINUTES = 120
-XFCE_SLEEP_PROPERTY = "/xfce4-power-manager/inactivity-on-ac"
+SLEEP_INHIBIT_ENV = "INHIBIT_SLEEP_ACTIVE"
 
 
 def get_output_paths(audio_file, output_dir):
@@ -74,78 +72,25 @@ def print_startup_overview(audio_file, output_dir, args, device, fp16):
     print("\n".join(overview_lines), flush=True)
 
 
-def _run_xfconf_query(*args):
-    xfconf_query = shutil.which("xfconf-query")
-    if xfconf_query is None:
-        raise FileNotFoundError("xfconf-query not found")
-
-    return subprocess.run(
-        [xfconf_query, "-c", "xfce4-power-manager", "-p", XFCE_SLEEP_PROPERTY, *args],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
 def maybe_inhibit_sleep():
     if os.environ.get(SLEEP_INHIBIT_ENV) == "1":
-        return None
+        return
 
-    inhibitor = shutil.which("systemd-inhibit")
-    if inhibitor is not None:
-        logging.info("Re-running under systemd-inhibit to prevent sleep while transcription runs.")
-        os.environ[SLEEP_INHIBIT_ENV] = "1"
-        os.execvp(
-            inhibitor,
-            [
-                inhibitor,
-                "--what=sleep:idle",
-                "--who=transcribe",
-                "--why=Prevent system sleep during transcription/diarization",
-                sys.executable,
-                os.path.abspath(sys.argv[0]),
-                *sys.argv[1:],
-            ],
-        )
+    sleep_guard = shutil.which("inhibit-sleep")
+    if sleep_guard is None:
+        logging.warning("inhibit-sleep helper not found; continuing without sleep inhibition.")
+        return
 
-    logging.warning("systemd-inhibit not found; trying XFCE inactivity timeout fallback.")
-
-    try:
-        current_timeout = int(_run_xfconf_query().stdout.strip())
-    except FileNotFoundError:
-        logging.warning("xfconf-query not found; continuing without sleep inhibition.")
-        return None
-    except (subprocess.CalledProcessError, ValueError) as e:
-        logging.warning(f"Could not read XFCE inactivity timeout; continuing without fallback. Error: {e}")
-        return None
-
-    if current_timeout == 0 or current_timeout > XFCE_SLEEP_TIMEOUT_MINUTES:
-        logging.info(
-            "Leaving XFCE inactivity timeout unchanged at %s minutes.",
-            current_timeout,
-        )
-        return None
-
-    try:
-        _run_xfconf_query("-s", str(XFCE_SLEEP_TIMEOUT_MINUTES))
-    except subprocess.CalledProcessError as e:
-        logging.warning(f"Could not set XFCE inactivity timeout fallback. Error: {e}")
-        return None
-
-    logging.info(
-        "Temporarily changed XFCE inactivity timeout from %s to %s minutes.",
-        current_timeout,
-        XFCE_SLEEP_TIMEOUT_MINUTES,
+    logging.info("Re-running under inhibit-sleep to prevent sleep while transcription runs.")
+    os.execvp(
+        sleep_guard,
+        [
+            sleep_guard,
+            sys.executable,
+            os.path.abspath(sys.argv[0]),
+            *sys.argv[1:],
+        ],
     )
-
-    def restore_timeout():
-        try:
-            _run_xfconf_query("-s", str(current_timeout))
-            logging.info("Restored XFCE inactivity timeout to %s minutes.", current_timeout)
-        except (FileNotFoundError, subprocess.CalledProcessError) as e:
-            logging.warning(f"Failed to restore XFCE inactivity timeout. Error: {e}")
-
-    return restore_timeout
 
 
 def load_whisper_module():
@@ -398,7 +343,7 @@ def main():
     device = "cuda"
     fp16 = True if args.fp16 is None else args.fp16
     setup_logging(audio_file, output_dir)
-    restore_sleep_timeout = maybe_inhibit_sleep()
+    maybe_inhibit_sleep()
     hf_token = check_env()
     print_startup_overview(audio_file, output_dir, args, device, fp16)
     logging.info(f"Using inference device: {device}")
@@ -472,8 +417,6 @@ def main():
     finally:
         if working_file and os.path.exists(working_file):
             os.remove(working_file)
-        if restore_sleep_timeout is not None:
-            restore_sleep_timeout()
 
     # Force clean exit to avoid "corrupted fastbins" crash from mixed ROCm library versions
     os._exit(0)
