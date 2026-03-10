@@ -1,6 +1,7 @@
 #!/home/dcar/.venvs/transcribe/bin/python
 import os
 import sys
+import shutil
 
 # PyTorch bundles MIOpen without gfx1151 support. The amdrocm 7.11 packages
 # provide a MIOpen with gfx1151 kernels. LD_PRELOAD it before torch loads.
@@ -24,6 +25,9 @@ from pyannote.core import Segment
 
 _WHISPER_MODULE = None
 FILE_TAG = "fast-whisper"
+SLEEP_INHIBIT_ENV = "TRANSCRIBE_SLEEP_INHIBITED"
+XFCE_SLEEP_TIMEOUT_MINUTES = 120
+XFCE_SLEEP_PROPERTY = "/xfce4-power-manager/inactivity-on-ac"
 
 
 def get_output_paths(audio_file, output_dir):
@@ -68,6 +72,80 @@ def print_startup_overview(audio_file, output_dir, args, device, fp16):
         f"Diarization cache: {cache_diarize}",
     ]
     print("\n".join(overview_lines), flush=True)
+
+
+def _run_xfconf_query(*args):
+    xfconf_query = shutil.which("xfconf-query")
+    if xfconf_query is None:
+        raise FileNotFoundError("xfconf-query not found")
+
+    return subprocess.run(
+        [xfconf_query, "-c", "xfce4-power-manager", "-p", XFCE_SLEEP_PROPERTY, *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def maybe_inhibit_sleep():
+    if os.environ.get(SLEEP_INHIBIT_ENV) == "1":
+        return None
+
+    inhibitor = shutil.which("systemd-inhibit")
+    if inhibitor is not None:
+        logging.info("Re-running under systemd-inhibit to prevent sleep while transcription runs.")
+        os.environ[SLEEP_INHIBIT_ENV] = "1"
+        os.execvp(
+            inhibitor,
+            [
+                inhibitor,
+                "--what=sleep:idle",
+                "--who=transcribe",
+                "--why=Prevent system sleep during transcription/diarization",
+                sys.executable,
+                os.path.abspath(sys.argv[0]),
+                *sys.argv[1:],
+            ],
+        )
+
+    logging.warning("systemd-inhibit not found; trying XFCE inactivity timeout fallback.")
+
+    try:
+        current_timeout = int(_run_xfconf_query().stdout.strip())
+    except FileNotFoundError:
+        logging.warning("xfconf-query not found; continuing without sleep inhibition.")
+        return None
+    except (subprocess.CalledProcessError, ValueError) as e:
+        logging.warning(f"Could not read XFCE inactivity timeout; continuing without fallback. Error: {e}")
+        return None
+
+    if current_timeout == 0 or current_timeout > XFCE_SLEEP_TIMEOUT_MINUTES:
+        logging.info(
+            "Leaving XFCE inactivity timeout unchanged at %s minutes.",
+            current_timeout,
+        )
+        return None
+
+    try:
+        _run_xfconf_query("-s", str(XFCE_SLEEP_TIMEOUT_MINUTES))
+    except subprocess.CalledProcessError as e:
+        logging.warning(f"Could not set XFCE inactivity timeout fallback. Error: {e}")
+        return None
+
+    logging.info(
+        "Temporarily changed XFCE inactivity timeout from %s to %s minutes.",
+        current_timeout,
+        XFCE_SLEEP_TIMEOUT_MINUTES,
+    )
+
+    def restore_timeout():
+        try:
+            _run_xfconf_query("-s", str(current_timeout))
+            logging.info("Restored XFCE inactivity timeout to %s minutes.", current_timeout)
+        except (FileNotFoundError, subprocess.CalledProcessError) as e:
+            logging.warning(f"Failed to restore XFCE inactivity timeout. Error: {e}")
+
+    return restore_timeout
 
 
 def load_whisper_module():
@@ -320,77 +398,82 @@ def main():
     device = "cuda"
     fp16 = True if args.fp16 is None else args.fp16
     setup_logging(audio_file, output_dir)
+    restore_sleep_timeout = maybe_inhibit_sleep()
     hf_token = check_env()
     print_startup_overview(audio_file, output_dir, args, device, fp16)
     logging.info(f"Using inference device: {device}")
 
-    # Preprocess
-    working_file = preprocess_audio(audio_file, output_dir)
+    working_file = None
 
-    start_total = time.time()
+    try:
+        # Preprocess
+        working_file = preprocess_audio(audio_file, output_dir)
 
-    transcribe_cache, diarize_cache = get_cache_paths(audio_file, output_dir)
+        start_total = time.time()
 
-    # 1. Transcribe
-    start_transcribe = time.time()
-    whisper_segments = transcribe_audio(
-        working_file,
-        model_size=args.model_size,
-        device=device,
-        fp16=fp16,
-        word_timestamps=args.word_timestamps,
-        verbose_decode=args.verbose_decode,
-        cache_file=transcribe_cache,
-    )
-    time_transcribe = time.time() - start_transcribe
+        transcribe_cache, diarize_cache = get_cache_paths(audio_file, output_dir)
 
-    # 2. Diarize
-    start_diarize = time.time()
-    diarization_result = diarize_audio(
-        working_file,
-        hf_token,
-        device=device,
-        batch_size=args.batch_size,
-        cache_file=diarize_cache,
-    )
-    time_diarize = time.time() - start_diarize
+        # 1. Transcribe
+        start_transcribe = time.time()
+        whisper_segments = transcribe_audio(
+            working_file,
+            model_size=args.model_size,
+            device=device,
+            fp16=fp16,
+            word_timestamps=args.word_timestamps,
+            verbose_decode=args.verbose_decode,
+            cache_file=transcribe_cache,
+        )
+        time_transcribe = time.time() - start_transcribe
 
-    # 3. Merge
-    start_merge = time.time()
-    result = merge_results(whisper_segments, diarization_result)
-    time_merge = time.time() - start_merge
+        # 2. Diarize
+        start_diarize = time.time()
+        diarization_result = diarize_audio(
+            working_file,
+            hf_token,
+            device=device,
+            batch_size=args.batch_size,
+            cache_file=diarize_cache,
+        )
+        time_diarize = time.time() - start_diarize
 
-    # 4. Output
-    output_txt, output_json = get_output_paths(audio_file, output_dir)
+        # 3. Merge
+        start_merge = time.time()
+        result = merge_results(whisper_segments, diarization_result)
+        time_merge = time.time() - start_merge
 
-    logging.info(f"Saving results to {output_txt} and {output_json}...")
+        # 4. Output
+        output_txt, output_json = get_output_paths(audio_file, output_dir)
 
-    with open(output_txt, "w") as f:
-        for item in result:
-            line = f"[{format_time(item['start'])} --> {format_time(item['end'])}] {item['speaker']}: {item['text']}"
-            f.write(line + "\n")
-            print(line)
+        logging.info(f"Saving results to {output_txt} and {output_json}...")
 
-    with open(output_json, "w") as f:
-        json.dump(result, f, indent=2)
+        with open(output_txt, "w") as f:
+            for item in result:
+                line = f"[{format_time(item['start'])} --> {format_time(item['end'])}] {item['speaker']}: {item['text']}"
+                f.write(line + "\n")
+                print(line)
 
-    total_time = time.time() - start_total
+        with open(output_json, "w") as f:
+            json.dump(result, f, indent=2)
 
-    print("\n" + "=" * 40)
-    print("       PERFORMANCE SUMMARY")
-    print("="*40)
-    print(f"Transcription : {format_time(time_transcribe)}")
-    print(f"Diarization   : {format_time(time_diarize)}")
-    print(f"Merging       : {format_time(time_merge)}")
-    print("-" * 40)
-    print(f"Total Time    : {format_time(total_time)}")
-    print("=" * 40 + "\n")
+        total_time = time.time() - start_total
 
-    logging.info("Done.")
+        print("\n" + "=" * 40)
+        print("       PERFORMANCE SUMMARY")
+        print("="*40)
+        print(f"Transcription : {format_time(time_transcribe)}")
+        print(f"Diarization   : {format_time(time_diarize)}")
+        print(f"Merging       : {format_time(time_merge)}")
+        print("-" * 40)
+        print(f"Total Time    : {format_time(total_time)}")
+        print("=" * 40 + "\n")
 
-    # Cleanup temp WAV
-    if os.path.exists(working_file):
-        os.remove(working_file)
+        logging.info("Done.")
+    finally:
+        if working_file and os.path.exists(working_file):
+            os.remove(working_file)
+        if restore_sleep_timeout is not None:
+            restore_sleep_timeout()
 
     # Force clean exit to avoid "corrupted fastbins" crash from mixed ROCm library versions
     os._exit(0)
