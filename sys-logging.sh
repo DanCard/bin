@@ -494,8 +494,8 @@ get_temp_summary() {
             fi
         fi
 
-        # nvm1 1 filter: show only if less than 100°F (~37778 mC)
-        if [[ "$sensor" == "nvm1 1" ]]; then
+        # nvm0 1 / nvm1 1 filter: show only if less than 100°F (~37778 mC)
+        if [[ "$sensor" == "nvm0 1" || "$sensor" == "nvm1 1" ]]; then
             if (( mc >= 37778 )); then
                 continue
             fi
