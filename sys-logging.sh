@@ -8,17 +8,12 @@
 #
 # Signal controls (while service is running):
 #   # Trigger manual burst profile from SIGUSR1
-#   # (defaults: level 2 timing => ~15s sampling for 120s)
+#   # (defaults: 5s sampling for 45s, then 10s for 50s, then 15s for 60s)
 #   # Use --kill-who=main so the current top sample is not interrupted.
 #   systemctl --user kill -s USR1 --kill-who=main sys-logging.service
 #
-#   # Trigger two-stage burst profile from SIGUSR2
-#   # (defaults: 5s sampling for 30s, then 15s for 120s)
-#   systemctl --user kill -s USR2 --kill-who=main sys-logging.service
-#
 #   # Alternative direct signal by PID
 #   kill -USR1 "$(systemctl --user show -p MainPID --value sys-logging.service)"
-#   kill -USR2 "$(systemctl --user show -p MainPID --value sys-logging.service)"
 
 # System Logger: top CPU, thermal summary, and fan speeds on one line.
 # Abbreviation legend used in log output:
@@ -48,102 +43,50 @@ TOP_PROCS_MIN_WIDTH=$((TOP_N * (7 + PROC_NAME_WIDTH) + ((TOP_N - 1) * 2)))
 # Event markers are appended to the next telemetry line:
 # - ▷   service start
 # - ⚡   resume detected (after suspend/wake)
-# - 🏃1  SIGUSR1 burst request
-# - 🏃1E SIGUSR1 burst complete
-# - 🏃2  SIGUSR2 profile request
-# - 🏃2C SIGUSR2 profile complete
+# - 🏃   SIGUSR1 burst request
+# - 🏃E SIGUSR1 burst complete
 # - 🌀N  level-based burst frequency set/changed (N = level 2-5)
 # - 🌀E level-based burst complete
 RESUME_DETECT_GRACE_MS="${RESUME_DETECT_GRACE_MS:-30000}"
 MANUAL_BURST_LEVEL="${MANUAL_BURST_LEVEL:-2}"
-MANUAL_BURST_DURATION_MS="${MANUAL_BURST_DURATION_MS:-120000}"
-USR2_PHASE1_INTERVAL="${USR2_PHASE1_INTERVAL:-5}"
-USR2_PHASE1_DURATION_MS="${USR2_PHASE1_DURATION_MS:-30000}"
-USR2_PHASE2_INTERVAL="${USR2_PHASE2_INTERVAL:-15}"
-USR2_PHASE2_DURATION_MS="${USR2_PHASE2_DURATION_MS:-120000}"
-STARTUP_BURST_INTERVAL="${STARTUP_BURST_INTERVAL:-15}"
-STARTUP_BURST_DURATION_MS="${STARTUP_BURST_DURATION_MS:-120000}"
-RESUME_PHASE1_INTERVAL="${RESUME_PHASE1_INTERVAL:-5}"
-RESUME_PHASE1_DURATION_MS="${RESUME_PHASE1_DURATION_MS:-30000}"
-RESUME_PHASE2_INTERVAL="${RESUME_PHASE2_INTERVAL:-10}"
-RESUME_PHASE2_DURATION_MS="${RESUME_PHASE2_DURATION_MS:-30000}"
-RESUME_PHASE3_INTERVAL="${RESUME_PHASE3_INTERVAL:-15}"
-RESUME_PHASE3_DURATION_MS="${RESUME_PHASE3_DURATION_MS:-60000}"
+BURST_PHASE1_INTERVAL="${BURST_PHASE1_INTERVAL:-5}"
+BURST_PHASE1_DURATION_MS="${BURST_PHASE1_DURATION_MS:-45000}"
+BURST_PHASE2_INTERVAL="${BURST_PHASE2_INTERVAL:-10}"
+BURST_PHASE2_DURATION_MS="${BURST_PHASE2_DURATION_MS:-50000}"
+BURST_PHASE3_INTERVAL="${BURST_PHASE3_INTERVAL:-15}"
+BURST_PHASE3_DURATION_MS="${BURST_PHASE3_DURATION_MS:-60000}"
 EVENT_QUEUE_FILE=""
 EVENT_MARKERS=""
 
-if [[ ! "$MANUAL_BURST_LEVEL" =~ ^[0-9]+$ ]] || (( MANUAL_BURST_LEVEL < 0 || MANUAL_BURST_LEVEL > 5 )); then
-    MANUAL_BURST_LEVEL=2
-fi
+validate_int() {
+    local var_name="$1" default_value="$2" min_value="$3" max_value="${4:-}"
+    local value="${!var_name}"
+    if [[ ! "$value" =~ ^[0-9]+$ ]] || (( value < min_value )) || { [[ -n "$max_value" ]] && (( value > max_value )); }; then
+        printf -v "$var_name" '%s' "$default_value"
+    fi
+}
 
-if [[ ! "$MANUAL_BURST_DURATION_MS" =~ ^[0-9]+$ ]] || (( MANUAL_BURST_DURATION_MS < 1000 )); then
-    MANUAL_BURST_DURATION_MS=120000
-fi
-
-if [[ ! "$USR2_PHASE1_INTERVAL" =~ ^[0-9]+$ ]] || (( USR2_PHASE1_INTERVAL < 1 )); then
-    USR2_PHASE1_INTERVAL=5
-fi
-
-if [[ ! "$USR2_PHASE1_DURATION_MS" =~ ^[0-9]+$ ]] || (( USR2_PHASE1_DURATION_MS < 1000 )); then
-    USR2_PHASE1_DURATION_MS=30000
-fi
-
-if [[ ! "$USR2_PHASE2_INTERVAL" =~ ^[0-9]+$ ]] || (( USR2_PHASE2_INTERVAL < 1 )); then
-    USR2_PHASE2_INTERVAL=15
-fi
-
-if [[ ! "$USR2_PHASE2_DURATION_MS" =~ ^[0-9]+$ ]] || (( USR2_PHASE2_DURATION_MS < 1000 )); then
-    USR2_PHASE2_DURATION_MS=120000
-fi
-
-if [[ ! "$STARTUP_BURST_INTERVAL" =~ ^[0-9]+$ ]] || (( STARTUP_BURST_INTERVAL < 1 )); then
-    STARTUP_BURST_INTERVAL=15
-fi
-
-if [[ ! "$STARTUP_BURST_DURATION_MS" =~ ^[0-9]+$ ]] || (( STARTUP_BURST_DURATION_MS < 1000 )); then
-    STARTUP_BURST_DURATION_MS=120000
-fi
-
-if [[ ! "$RESUME_PHASE1_INTERVAL" =~ ^[0-9]+$ ]] || (( RESUME_PHASE1_INTERVAL < 1 )); then
-    RESUME_PHASE1_INTERVAL=5
-fi
-
-if [[ ! "$RESUME_PHASE1_DURATION_MS" =~ ^[0-9]+$ ]] || (( RESUME_PHASE1_DURATION_MS < 1000 )); then
-    RESUME_PHASE1_DURATION_MS=30000
-fi
-
-if [[ ! "$RESUME_PHASE2_INTERVAL" =~ ^[0-9]+$ ]] || (( RESUME_PHASE2_INTERVAL < 1 )); then
-    RESUME_PHASE2_INTERVAL=10
-fi
-
-if [[ ! "$RESUME_PHASE2_DURATION_MS" =~ ^[0-9]+$ ]] || (( RESUME_PHASE2_DURATION_MS < 1000 )); then
-    RESUME_PHASE2_DURATION_MS=30000
-fi
-
-if [[ ! "$RESUME_PHASE3_INTERVAL" =~ ^[0-9]+$ ]] || (( RESUME_PHASE3_INTERVAL < 1 )); then
-    RESUME_PHASE3_INTERVAL=15
-fi
-
-if [[ ! "$RESUME_PHASE3_DURATION_MS" =~ ^[0-9]+$ ]] || (( RESUME_PHASE3_DURATION_MS < 1000 )); then
-    RESUME_PHASE3_DURATION_MS=60000
-fi
-
-if [[ ! "$RESUME_DETECT_GRACE_MS" =~ ^[0-9]+$ ]] || (( RESUME_DETECT_GRACE_MS < 1000 )); then
-    RESUME_DETECT_GRACE_MS=30000
-fi
+validate_int MANUAL_BURST_LEVEL 2 0 5
+validate_int BURST_PHASE1_INTERVAL 5 1
+validate_int BURST_PHASE1_DURATION_MS 45000 1000
+validate_int BURST_PHASE2_INTERVAL 10 1
+validate_int BURST_PHASE2_DURATION_MS 50000 1000
+validate_int BURST_PHASE3_INTERVAL 15 1
+validate_int BURST_PHASE3_DURATION_MS 60000 1000
+validate_int RESUME_DETECT_GRACE_MS 30000 1000
 
 ACTIVE_BURST_LEVEL=0
 ACTIVE_BURST_UNTIL_MS=0
 ACTIVE_BURST_INTERVAL_OVERRIDE=""
-USR2_PHASE1_UNTIL_MS=0
-USR2_PHASE2_UNTIL_MS=0
-RESUME_PHASE1_UNTIL_MS=0
-RESUME_PHASE2_UNTIL_MS=0
-RESUME_PHASE3_UNTIL_MS=0
 LAST_BURST_DELAY=""
 LAST_BURST_SOURCE=""
 USR1_BURST_UNTIL_MS=0
 LAST_USR1_ACTIVE=0
+BURST_PHASE1_UNTIL_MS=0
+BURST_PHASE2_UNTIL_MS=0
+BURST_PHASE3_UNTIL_MS=0
+BURST_RESULT_UNTIL_MS=0
+BURST_RESULT_INTERVAL=""
 
 mkdir -p "$LOG_DIR"
 # Separate past and present logs if the log file already exists.
@@ -212,43 +155,52 @@ handle_stop() {
     exit 0
 }
 
-activate_manual_burst() {
-    local now_ms candidate_until_ms
-    ACTIVE_BURST_INTERVAL_OVERRIDE=""
-    USR2_PHASE1_UNTIL_MS=0
-    USR2_PHASE2_UNTIL_MS=0
-    now_ms=$(date +%s%3N)
-    candidate_until_ms=$((now_ms + MANUAL_BURST_DURATION_MS))
-    if (( candidate_until_ms > USR1_BURST_UNTIL_MS )); then
-        USR1_BURST_UNTIL_MS=$candidate_until_ms
+start_burst_profile() {
+    local now_ms="$1"
+    BURST_PHASE1_UNTIL_MS=$((now_ms + BURST_PHASE1_DURATION_MS))
+    BURST_PHASE2_UNTIL_MS=$((BURST_PHASE1_UNTIL_MS + BURST_PHASE2_DURATION_MS))
+    BURST_PHASE3_UNTIL_MS=$((BURST_PHASE2_UNTIL_MS + BURST_PHASE3_DURATION_MS))
+    BURST_RESULT_UNTIL_MS=$BURST_PHASE3_UNTIL_MS
+}
+
+get_burst_profile_interval() {
+    local now_ms="$1"
+    BURST_RESULT_INTERVAL=""
+    if (( BURST_PHASE3_UNTIL_MS == 0 )); then
+        return
     fi
+    if (( now_ms < BURST_PHASE1_UNTIL_MS )); then
+        BURST_RESULT_INTERVAL="$BURST_PHASE1_INTERVAL"
+    elif (( now_ms < BURST_PHASE2_UNTIL_MS )); then
+        BURST_RESULT_INTERVAL="$BURST_PHASE2_INTERVAL"
+    elif (( now_ms < BURST_PHASE3_UNTIL_MS )); then
+        BURST_RESULT_INTERVAL="$BURST_PHASE3_INTERVAL"
+    else
+        BURST_PHASE1_UNTIL_MS=0
+        BURST_PHASE2_UNTIL_MS=0
+        BURST_PHASE3_UNTIL_MS=0
+    fi
+}
+
+activate_manual_burst() {
+    local now_ms
+    ACTIVE_BURST_INTERVAL_OVERRIDE=""
+    now_ms=$(date +%s%3N)
+    start_burst_profile "$now_ms"
+    USR1_BURST_UNTIL_MS=$BURST_RESULT_UNTIL_MS
 
     if (( MANUAL_BURST_LEVEL > ACTIVE_BURST_LEVEL )); then
         ACTIVE_BURST_LEVEL=$MANUAL_BURST_LEVEL
-        ACTIVE_BURST_UNTIL_MS=$candidate_until_ms
-    elif (( MANUAL_BURST_LEVEL == ACTIVE_BURST_LEVEL && candidate_until_ms > ACTIVE_BURST_UNTIL_MS )); then
-        ACTIVE_BURST_UNTIL_MS=$candidate_until_ms
+        ACTIVE_BURST_UNTIL_MS=$BURST_RESULT_UNTIL_MS
+    elif (( MANUAL_BURST_LEVEL == ACTIVE_BURST_LEVEL && BURST_RESULT_UNTIL_MS > ACTIVE_BURST_UNTIL_MS )); then
+        ACTIVE_BURST_UNTIL_MS=$BURST_RESULT_UNTIL_MS
     fi
 
-    enqueue_event_marker "${USER_BURST_EVENT_CODE}1"
-}
-
-activate_profile_burst_usr2() {
-    local now_ms
-    now_ms=$(date +%s%3N)
-    USR2_PHASE1_UNTIL_MS=$((now_ms + USR2_PHASE1_DURATION_MS))
-    USR2_PHASE2_UNTIL_MS=$((USR2_PHASE1_UNTIL_MS + USR2_PHASE2_DURATION_MS))
-
-    ACTIVE_BURST_LEVEL=2
-    ACTIVE_BURST_UNTIL_MS=$USR2_PHASE2_UNTIL_MS
-    ACTIVE_BURST_INTERVAL_OVERRIDE="$USR2_PHASE1_INTERVAL"
-
-    enqueue_event_marker "${USER_BURST_EVENT_CODE}2"
+    enqueue_event_marker "${USER_BURST_EVENT_CODE}"
 }
 
 trap 'handle_stop' SIGTERM SIGINT
 trap 'activate_manual_burst' SIGUSR1
-trap 'activate_profile_burst_usr2' SIGUSR2
 
 SHOW_ACPI_EC=0
 while [[ $# -gt 0 ]]; do
@@ -683,8 +635,9 @@ get_top_procs() {
 load_event_markers
 enqueue_event_marker "$START_EVENT_CODE"
 STARTUP_NOW_MS=$(date +%s%3N)
-ACTIVE_BURST_UNTIL_MS=$((STARTUP_NOW_MS + STARTUP_BURST_DURATION_MS))
-ACTIVE_BURST_INTERVAL_OVERRIDE="$STARTUP_BURST_INTERVAL"
+start_burst_profile "$STARTUP_NOW_MS"
+ACTIVE_BURST_UNTIL_MS=$BURST_RESULT_UNTIL_MS
+ACTIVE_BURST_INTERVAL_OVERRIDE="$BURST_PHASE1_INTERVAL"
 
 # Bootstrap fan snapshot so first-loop burst logic has a valid input.
 FAN_MODE=$(get_fan_mode)
@@ -722,39 +675,14 @@ while true; do
     NOW_MS=$(date +%s%3N)
     USR1_ACTIVE=0
 
-    if (( RESUME_PHASE3_UNTIL_MS > 0 )); then
-        if (( NOW_MS < RESUME_PHASE1_UNTIL_MS )); then
-            ACTIVE_BURST_INTERVAL_OVERRIDE="$RESUME_PHASE1_INTERVAL"
-        elif (( NOW_MS < RESUME_PHASE2_UNTIL_MS )); then
-            ACTIVE_BURST_INTERVAL_OVERRIDE="$RESUME_PHASE2_INTERVAL"
-        elif (( NOW_MS < RESUME_PHASE3_UNTIL_MS )); then
-            ACTIVE_BURST_INTERVAL_OVERRIDE="$RESUME_PHASE3_INTERVAL"
-        else
-            ACTIVE_BURST_INTERVAL_OVERRIDE=""
-            RESUME_PHASE1_UNTIL_MS=0
-            RESUME_PHASE2_UNTIL_MS=0
-            RESUME_PHASE3_UNTIL_MS=0
-        fi
-    fi
-
-    if (( USR2_PHASE2_UNTIL_MS > 0 )); then
-        if (( NOW_MS < USR2_PHASE1_UNTIL_MS )); then
-            ACTIVE_BURST_INTERVAL_OVERRIDE="$USR2_PHASE1_INTERVAL"
-        elif (( NOW_MS < USR2_PHASE2_UNTIL_MS )); then
-            ACTIVE_BURST_INTERVAL_OVERRIDE="$USR2_PHASE2_INTERVAL"
-        else
-            ACTIVE_BURST_INTERVAL_OVERRIDE=""
-            USR2_PHASE1_UNTIL_MS=0
-            USR2_PHASE2_UNTIL_MS=0
-            enqueue_event_marker "${USER_BURST_EVENT_CODE}2C"
-        fi
-    fi
+    get_burst_profile_interval "$NOW_MS"
+    ACTIVE_BURST_INTERVAL_OVERRIDE="$BURST_RESULT_INTERVAL"
 
     if (( USR1_BURST_UNTIL_MS > NOW_MS )); then
         USR1_ACTIVE=1
     fi
     if (( LAST_USR1_ACTIVE == 1 && USR1_ACTIVE == 0 )); then
-        enqueue_event_marker "${USER_BURST_EVENT_CODE}1E"
+        enqueue_event_marker "${USER_BURST_EVENT_CODE}E"
     fi
     LAST_USR1_ACTIVE=$USR1_ACTIVE
     if (( USR1_BURST_UNTIL_MS > 0 && NOW_MS >= USR1_BURST_UNTIL_MS )); then
@@ -817,14 +745,12 @@ while true; do
         printf "\n" >> "$LOG_DIR/$LOG_PREFIX-$CURRENT_DATE.log"
         enqueue_event_marker "$RESUME_EVENT_CODE"
         RESUME_NOW_MS=$(date +%s%3N)
-        RESUME_PHASE1_UNTIL_MS=$((RESUME_NOW_MS + RESUME_PHASE1_DURATION_MS))
-        RESUME_PHASE2_UNTIL_MS=$((RESUME_PHASE1_UNTIL_MS + RESUME_PHASE2_DURATION_MS))
-        RESUME_PHASE3_UNTIL_MS=$((RESUME_PHASE2_UNTIL_MS + RESUME_PHASE3_DURATION_MS))
+        start_burst_profile "$RESUME_NOW_MS"
         
-        if (( RESUME_PHASE3_UNTIL_MS > ACTIVE_BURST_UNTIL_MS )); then
-            ACTIVE_BURST_UNTIL_MS=$RESUME_PHASE3_UNTIL_MS
+        if (( BURST_RESULT_UNTIL_MS > ACTIVE_BURST_UNTIL_MS )); then
+            ACTIVE_BURST_UNTIL_MS=$BURST_RESULT_UNTIL_MS
         fi
-        ACTIVE_BURST_INTERVAL_OVERRIDE="$RESUME_PHASE1_INTERVAL"
+        ACTIVE_BURST_INTERVAL_OVERRIDE="$BURST_PHASE1_INTERVAL"
     fi
     MIN_SAMPLE_ELAPSED_MS=$((TOP_SAMPLE_DELAY * 1000 - 1000))
     if (( MIN_SAMPLE_ELAPSED_MS < 0 )); then
