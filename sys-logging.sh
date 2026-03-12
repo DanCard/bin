@@ -513,10 +513,49 @@ get_temp_summary() {
         fi
 
         if [[ "$sensor" != acpitz* ]] && (( first_non_acpi )); then
-            temp_formatted=$(printf "%5s %3d°F %-*.*s" "$(format_temp_c "$millidegrees")" "$(( (millidegrees * 9 / 5 + 32000) / 1000 ))" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
+            # Format temperature string for non-ACPI sensors with both Celsius and Fahrenheit values
+            # Printf format specifiers breakdown:
+            #   %5s      - First argument: Celsius temperature string (e.g., "45.5°C"), right-aligned in 5-character field
+            #   %3d°F    - Second argument: Fahrenheit temperature integer (e.g., "114"), right-aligned in 3-char field, followed by °F
+            #   %-*.*s   - Third argument: Sensor label string, using dynamic width and precision
+            #       - *   - Field width taken from argument (fourth argument: $TEMP_LABEL_WIDTH)
+            #       - .*  - Precision taken from argument (fifth argument: $TEMP_LABEL_WIDTH)
+            #       - s   - String type, left-aligned due to leading minus sign in %-*.*s
+            # Why dynamic width and precision (* vs hardcoded number)?
+            #   1. Configurable column width - TEMP_LABEL_WIDTH can be adjusted in one place to change all label column spacing
+            #   2. Consistent alignment - All sensor labels use the same width value, ensuring uniform formatting
+            #   3. Flexible formatting - Same printf format works regardless of actual width setting (e.g., change from 15 to 20 without editing format string)
+            #   4. Maintainability - Single source of truth vs hardcoding numbers like %-15.15s scattered throughout
+            # Arguments breakdown:
+            #   $(format_temp_c "$millidegrees") - Converts millidegrees to formatted Celsius string (e.g., 45000 → "45.0°C")
+            #   $(( (millidegrees * 9 / 5 + 32000) / 1000 )) - Fahrenheit conversion formula:
+            #       - millidegrees * 9 / 5      - Convert millidegrees Celsius to millidegrees Fahrenheit
+            #       - + 32000                    - Add 32 degrees in millidegree units (32 * 1000)
+            #       - / 1000                     - Convert millidegrees to whole degrees (integer division truncates)
+            #       Example: 45000 millidegrees → (45000 * 9 / 5 + 32000) / 1000 = 113000 / 1000 = 113°F
+            #   $TEMP_LABEL_WIDTH              - Variable controlling label column width for alignment
+            #   $label                         - Sensor identifier string to display in the label column
+            temp_formatted=$(printf "%5s %3d°%-*.*s" "$(format_temp_c "$millidegrees")" "$(( (millidegrees * 9 / 5 + 32000) / 1000 ))" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
             first_non_acpi=0
         else
-            temp_formatted=$(printf "%5s %-*.*s" "$(format_temp_c "$millidegrees")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
+            # Format temperature string for ACPI sensors (or subsequent sensors) with only Celsius value
+            # Printf format specifiers breakdown:
+            #   %5s      - First argument: Celsius temperature string (e.g., "45.5°C"), right-aligned in 5-character field
+            #   %-*.*s   - Second argument: Sensor label string, using dynamic width and precision
+            #       - *   - Field width taken from argument (third argument: $TEMP_LABEL_WIDTH)
+            #       - .*  - Precision taken from argument (fourth argument: $TEMP_LABEL_WIDTH)
+            #       - s   - String type, left-aligned due to leading minus sign in %-*.*s
+            # Why dynamic width and precision (* vs hardcoded number)?
+            #   1. Configurable column width - TEMP_LABEL_WIDTH can be adjusted in one place to change all label column spacing
+            #   2. Consistent alignment - All sensor labels use the same width value, ensuring uniform formatting
+            #   3. Flexible formatting - Same printf format works regardless of actual width setting (e.g., change from 15 to 20 without editing format string)
+            #   4. Maintainability - Single source of truth vs hardcoding numbers like %-15.15s scattered throughout
+            # Arguments breakdown:
+            #   $(format_temp_c "$millidegrees") - Converts millidegrees to formatted Celsius string (e.g., 45000 → "45.0°C")
+            #   $TEMP_LABEL_WIDTH              - Variable controlling label column width for alignment
+            #   $label                         - Sensor identifier string to display in the label column
+            # Note: This format is used for ACPI sensors because Fahrenheit is redundant (displayed separately)
+            temp_formatted=$(printf "%5s%-*.*s" "$(format_temp_c "$millidegrees")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
         fi
 
         if [[ -z "$temp_accum_output" ]]; then
