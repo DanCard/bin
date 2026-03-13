@@ -293,7 +293,8 @@ get_burst_interval_for_level() {
 get_burst_duration_ms_for_level() {
     local level="$1"
     case "$level" in
-        2|3) printf "60000" ;;
+        2) printf "90000" ;;
+        3) printf "60000" ;;
         4) printf "30000" ;;
         5) printf "16000" ;;
         *) printf "0" ;;
