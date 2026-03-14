@@ -5,6 +5,7 @@ import time
 import json
 import argparse
 import subprocess
+import shutil
 import requests
 import psutil
 
@@ -164,6 +165,11 @@ def create_google_doc(file_path, agent):
     """Uses the specified CLI agent to create a Google Doc from the markdown file."""
     print(f"📁 Creating Google Doc in defensetech account using {agent}...")
     try:
+        agent_path = shutil.which(agent)
+        if not agent_path:
+            print(f"⚠️ Warning: Could not find CLI agent '{agent}' in PATH.")
+            return
+
         # 1. Switch auth to defensetech
         switch_script = os.path.expanduser("~/.gemini/switch_auth.sh")
         subprocess.run(
@@ -180,9 +186,14 @@ def create_google_doc(file_path, agent):
             "content. The title should be based on the meeting title in the file. "
             "Include a clickable link to the new doc."
         )
-        
+
+        if agent == "opencode":
+            cmd = [agent_path, "run", prompt]
+        else:
+            cmd = [agent_path, "--approval-mode", "auto_edit", prompt]
+
         # Run command without shell=True for safety
-        subprocess.run([agent, "--approval-mode", "auto_edit", prompt], check=True)
+        subprocess.run(cmd, check=True)
         print(f"✅ Google Doc creation request sent via {agent}.")
 
     except subprocess.CalledProcessError as e:
