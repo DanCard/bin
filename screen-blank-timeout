@@ -1,0 +1,30 @@
+#!/bin/sh
+
+set -eu
+
+if [ "$#" -ne 1 ]; then
+  printf 'Usage: %s <seconds>\n' "$0" >&2
+  exit 1
+fi
+
+timeout_seconds=$1
+
+case $timeout_seconds in
+  ''|*[!0-9]*)
+    printf 'Timeout must be a positive integer.\n' >&2
+    exit 1
+    ;;
+esac
+
+if [ "$timeout_seconds" -le 0 ]; then
+  printf 'Timeout must be greater than 0.\n' >&2
+  exit 1
+fi
+
+off_seconds=$((timeout_seconds * 2))
+
+set -x
+xset s "$timeout_seconds" "$timeout_seconds"
+xset +dpms
+xset dpms "$timeout_seconds" "$timeout_seconds" "$off_seconds"
+set +x

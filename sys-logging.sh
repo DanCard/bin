@@ -284,8 +284,8 @@ get_burst_interval_for_level() {
     case "$level" in
         2) printf "15" ;;
         3) printf "8" ;;
-        4) printf "4" ;;
-        5) printf "2" ;;
+        4) printf "6" ;;
+        5) printf "4" ;;
         *) printf "%s" "$DEFAULT_TOP_SAMPLE_DELAY" ;;
     esac
 }

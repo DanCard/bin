@@ -8,11 +8,11 @@
 #
 # HOW IT WORKS:
 #   1. Creates a virtual PipeWire sink (like a fake speaker)
-#   2. Disconnects Signal (ringrtc) from your real speakers
-#   3. Routes Signal audio into the virtual sink instead
+#   2. Finds Signal's active sink-input in PulseAudio/PipeWire
+#   3. Moves just that sink-input into the virtual sink
 #   4. Loops the virtual sink back to your speakers (so you still hear the call)
 #   5. Records from the virtual sink's monitor (Signal only) + your mic
-#   6. On exit, rewires Signal back to speakers and removes the virtual sink
+#   6. On exit, restores Signal to its original sink and removes temporary modules
 #
 # USAGE:
 #   signal-record.sh [name]    # Start a Signal call first, then run this
@@ -22,16 +22,16 @@
 #   Press 'q' or Ctrl+C to stop recording
 #
 # REQUIRES: PipeWire, PulseAudio compatibility layer, ffmpeg
-#   Signal must be in an active call (ringrtc node must exist)
+#   Signal must be in an active call (a Signal sink-input must exist)
 
 # --- Hardware-specific device names (from `pactl list short sinks/sources`) ---
 SPEAKER="alsa_output.pci-0000_c6_00.6.analog-stereo"          # Built-in speakers
 ORIGINAL_MIC="alsa_input.usb-EMEET_HD_Webcam_eMeet_C950_A230803002402311-02.analog-stereo"  # USB webcam mic
-SIGNAL_NODE="ringrtc"       # Signal's WebRTC audio output node name in PipeWire
+SIGNAL_NODE="ringrtc"       # Signal's WebRTC node name, used for mic auto-detection only
 VIRTUAL_SINK="signal_sink"  # Name for the virtual sink we create
 
-# Tunable output gain for Signal-isolated recordings (override per run if needed):
-SIGNAL_REMOTE_GAIN_DB="${SIGNAL_REMOTE_GAIN_DB:-22}"
+# Tunable gain for diagnostics and optional mic trim:
+SIGNAL_REMOTE_GAIN_DB="${SIGNAL_REMOTE_GAIN_DB:-0}"
 SIGNAL_MIC_GAIN_DB="${SIGNAL_MIC_GAIN_DB:-0}"
 # Self-test recording length in seconds (override per run if needed):
 SIGNAL_SELF_TEST_SECONDS="${SIGNAL_SELF_TEST_SECONDS:-25}"
@@ -52,8 +52,8 @@ Options:
   -h, --help                         Show this help
 
 Environment:
-  SIGNAL_REMOTE_GAIN_DB    Remote gain in dB (default: ${SIGNAL_REMOTE_GAIN_DB})
-  SIGNAL_MIC_GAIN_DB       Mic gain in dB (default: ${SIGNAL_MIC_GAIN_DB})
+  SIGNAL_REMOTE_GAIN_DB    Diagnostic self-test gain in dB (default: ${SIGNAL_REMOTE_GAIN_DB})
+  SIGNAL_MIC_GAIN_DB       Mic gain trim in dB (default: ${SIGNAL_MIC_GAIN_DB})
 EOF
 }
 
@@ -127,9 +127,13 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 OUTFILE="${NAME}-${TIMESTAMP}.m4a"
 
 # Track what we set up so cleanup only undoes what we did
-LOADED_EC=0
-LOADED_SINK=0
-REWIRED=0
+ECHO_MODULE_ID=""
+SINK_MODULE_ID=""
+LOOPBACK_MODULE_ID=""
+SIGNAL_SINK_INPUT_ID=""
+SIGNAL_ORIGINAL_SINK=""
+SIGNAL_SINK_INPUT_VOLUME=""
+SIGNAL_MATCH_DESC=""
 
 ORIGINAL_MUTE_STATE=$(pactl get-source-mute "$ORIGINAL_MIC" 2>/dev/null | grep -i 'yes')
 if [ "$MUTE_MIC" -eq 1 ]; then
@@ -137,28 +141,140 @@ if [ "$MUTE_MIC" -eq 1 ]; then
     echo "Hardware mic muted via --mute-system-mic-during-recording."
 fi
 
+find_signal_sink_input() {
+    local -a matches
+    local count
+
+    mapfile -t matches < <(
+        pactl list sink-inputs 2>/dev/null | awk '
+            BEGIN { RS=""; FS="\n" }
+            /^Sink Input #[0-9]+/ {
+                id=""; sink=""; volume=""; process=""; app=""; media=""; node=""
+                for (i = 1; i <= NF; i++) {
+                    line = $i
+                    lower = tolower(line)
+                    if (line ~ /^Sink Input #[0-9]+/) {
+                        sub(/^Sink Input #/, "", line)
+                        id = line
+                    } else if (line ~ /^[[:space:]]*Sink: /) {
+                        sub(/^[[:space:]]*Sink: /, "", line)
+                        sink = line
+                    } else if (line ~ /^[[:space:]]*Volume: / && volume == "") {
+                        sub(/^[[:space:]]*Volume: /, "", line)
+                        volume = line
+                    } else if (lower ~ /application\.process\.binary = /) {
+                        sub(/.*= "/, "", line)
+                        sub(/"$/, "", line)
+                        process = line
+                    } else if (lower ~ /application\.name = /) {
+                        sub(/.*= "/, "", line)
+                        sub(/"$/, "", line)
+                        app = line
+                    } else if (lower ~ /media\.name = /) {
+                        sub(/.*= "/, "", line)
+                        sub(/"$/, "", line)
+                        media = line
+                    } else if (lower ~ /node\.name = /) {
+                        sub(/.*= "/, "", line)
+                        sub(/"$/, "", line)
+                        node = line
+                    }
+                }
+
+                haystack = tolower(process " " app " " media " " node)
+                if (haystack ~ /(signal|ringrtc)/) {
+                    print id "|" sink "|" volume "|" process "|" app "|" media "|" node
+                }
+            }
+        '
+    )
+
+    count=${#matches[@]}
+    if [ "$count" -eq 0 ]; then
+        echo "ERROR: No active Signal sink-input found."
+        echo "Start a Signal call first, make sure audio is playing, then run this script."
+        return 1
+    fi
+
+    if [ "$count" -gt 1 ]; then
+        echo "ERROR: Multiple Signal-like sink-inputs found; refusing to guess."
+        printf '  %s\n' "${matches[@]}"
+        return 1
+    fi
+
+    IFS='|' read -r SIGNAL_SINK_INPUT_ID SIGNAL_ORIGINAL_SINK SIGNAL_SINK_INPUT_VOLUME _process _app _media _node <<< "${matches[0]}"
+    SIGNAL_MATCH_DESC="process=${_process:-?}, app=${_app:-?}, media=${_media:-?}, node=${_node:-?}"
+}
+
+find_existing_module_id() {
+    local module_name="$1"
+    local match_text="$2"
+
+    pactl list short modules 2>/dev/null | awk -v module_name="$module_name" -v match_text="$match_text" '
+        $2 == module_name && index($0, match_text) { print $1; exit }
+    '
+}
+
+build_live_mix_filter() {
+    if [ "$FINAL_MIC_ON" -ne 1 ]; then
+        return
+    fi
+
+    if [ "${SIGNAL_MIC_GAIN_DB}" = "0" ]; then
+        MIX_FILTER="[0:a][1:a]amix=inputs=2:duration=longest:normalize=0"
+    else
+        MIX_FILTER="[1:a]volume=${SIGNAL_MIC_GAIN_DB}dB[mic];[0:a][mic]amix=inputs=2:duration=longest:normalize=0"
+    fi
+}
+
+build_self_test_filter() {
+    local remote_branch="[0:a]"
+    local mic_branch="[1:a]"
+    local remote_branch_output="[0:a]"
+    local mic_branch_output="[1:a]"
+
+    if [ "${SIGNAL_REMOTE_GAIN_DB}" != "0" ]; then
+        remote_branch="[0:a]volume=${SIGNAL_REMOTE_GAIN_DB}dB[remote]"
+        remote_branch_output="[remote]"
+    fi
+
+    if [ "$FINAL_MIC_ON" -eq 1 ]; then
+        if [ "${SIGNAL_MIC_GAIN_DB}" != "0" ]; then
+            mic_branch="[1:a]volume=${SIGNAL_MIC_GAIN_DB}dB[mic]"
+            mic_branch_output="[mic]"
+        fi
+        SELF_TEST_FILTER="${remote_branch};${mic_branch};${remote_branch_output}${mic_branch_output}amix=inputs=2:duration=longest:normalize=0"
+    else
+        if [ "${SIGNAL_REMOTE_GAIN_DB}" != "0" ]; then
+            SELF_TEST_FILTER="${remote_branch#\[0:a\]}"
+        else
+            SELF_TEST_FILTER=""
+        fi
+    fi
+}
+
 # Undo all audio routing changes on exit (Ctrl+C, quit, or error)
 cleanup() {
     echo -e "\n------------------------------------------------"
     echo "Cleaning up..."
 
-    if [ "$REWIRED" -eq 1 ]; then
-        pw-link -d "${SIGNAL_NODE}:output_FL" "${VIRTUAL_SINK}:playback_FL" 2>/dev/null
-        pw-link -d "${SIGNAL_NODE}:output_FR" "${VIRTUAL_SINK}:playback_FR" 2>/dev/null
-        pw-link -d "${VIRTUAL_SINK}:monitor_FL" "${SPEAKER}:playback_FL" 2>/dev/null
-        pw-link -d "${VIRTUAL_SINK}:monitor_FR" "${SPEAKER}:playback_FR" 2>/dev/null
-        pw-link "${SIGNAL_NODE}:output_FL" "${SPEAKER}:playback_FL" 2>/dev/null
-        pw-link "${SIGNAL_NODE}:output_FR" "${SPEAKER}:playback_FR" 2>/dev/null
-        echo "  Signal audio restored to speakers"
+    if [ -n "$SIGNAL_SINK_INPUT_ID" ] && [ -n "$SIGNAL_ORIGINAL_SINK" ]; then
+        pactl move-sink-input "$SIGNAL_SINK_INPUT_ID" "$SIGNAL_ORIGINAL_SINK" 2>/dev/null && \
+            echo "  Signal sink-input restored to sink ${SIGNAL_ORIGINAL_SINK}"
     fi
 
-    if [ "$LOADED_SINK" -eq 1 ]; then
-        pactl unload-module module-null-sink 2>/dev/null || true
+    if [ -n "$LOOPBACK_MODULE_ID" ]; then
+        pactl unload-module "$LOOPBACK_MODULE_ID" 2>/dev/null || true
+        echo "  Monitor loopback removed"
+    fi
+
+    if [ -n "$SINK_MODULE_ID" ]; then
+        pactl unload-module "$SINK_MODULE_ID" 2>/dev/null || true
         echo "  Virtual sink removed"
     fi
 
-    if [ "$LOADED_EC" -eq 1 ]; then
-        pactl unload-module module-echo-cancel 2>/dev/null || true
+    if [ -n "$ECHO_MODULE_ID" ]; then
+        pactl unload-module "$ECHO_MODULE_ID" 2>/dev/null || true
         echo "  Echo cancel module unloaded"
     fi
 
@@ -196,11 +312,10 @@ else
     echo "MIC MODE: ON"
 fi
 
-if [ "$FINAL_MIC_ON" -eq 1 ]; then
-    MIX_FILTER="[0:a]pan=mono|c0=0.5*c0+0.5*c1,volume=${SIGNAL_REMOTE_GAIN_DB}dB[sig];[1:a]volume=${SIGNAL_MIC_GAIN_DB}dB[mic];[sig][mic]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.95,pan=stereo|c0=c0|c1=c0"
-else
-    MIX_FILTER="[0:a]pan=mono|c0=0.5*c0+0.5*c1,volume=${SIGNAL_REMOTE_GAIN_DB}dB,alimiter=limit=0.95,pan=stereo|c0=c0|c1=c0"
-fi
+MIX_FILTER=""
+SELF_TEST_FILTER=""
+build_live_mix_filter
+build_self_test_filter
 
 print_self_test_report() {
     local mean max ch0_mean ch1_mean balance_diff
@@ -249,7 +364,7 @@ print_self_test_report() {
         echo "SELF-TEST RESULT    : PASS"
     else
         echo "SELF-TEST RESULT    : FAIL"
-        echo "Tip: Check SIGNAL_REMOTE_GAIN_DB setting."
+        echo "Tip: Self-test only validates the ffmpeg path, not live Signal sink-input loudness."
     fi
     echo "------------------------------------------------"
 }
@@ -262,24 +377,33 @@ if [ "$SELF_TEST" -eq 1 ]; then
     echo "------------------------------------------------"
 
     # Self-test inputs:
-    #   input 0 = deterministic calibration tone (asymmetric left only, to verify L/R downmix)
+    #   input 0 = deterministic remote tone
     if [ "$FINAL_MIC_ON" -eq 1 ]; then
         ffmpeg -stats -y \
-          -f lavfi -i "aevalsrc=0.01*sin(2*PI*997*t)|0:s=48000" \
-          -f lavfi -i "aevalsrc=0.03*sin(2*PI*400*t)|0:s=48000" \
-          -filter_complex "$MIX_FILTER" \
+          -f lavfi -i "aevalsrc=0.04*sin(2*PI*997*t)|0.04*sin(2*PI*997*t):s=48000" \
+          -f lavfi -i "aevalsrc=0.02*sin(2*PI*400*t):s=48000" \
+          -filter_complex "$SELF_TEST_FILTER" \
           -c:a aac -b:a 192k \
           -ac 2 \
           -t "$SELF_TEST_SECONDS" \
           "$OUTFILE"
     else
-        ffmpeg -stats -y \
-          -f lavfi -i "aevalsrc=0.01*sin(2*PI*997*t)|0:s=48000" \
-          -filter_complex "$MIX_FILTER" \
-          -c:a aac -b:a 192k \
-          -ac 2 \
-          -t "$SELF_TEST_SECONDS" \
-          "$OUTFILE"
+        if [ -n "$SELF_TEST_FILTER" ]; then
+            ffmpeg -stats -y \
+              -f lavfi -i "aevalsrc=0.04*sin(2*PI*997*t)|0.04*sin(2*PI*997*t):s=48000" \
+              -af "$SELF_TEST_FILTER" \
+              -c:a aac -b:a 192k \
+              -ac 2 \
+              -t "$SELF_TEST_SECONDS" \
+              "$OUTFILE"
+        else
+            ffmpeg -stats -y \
+              -f lavfi -i "aevalsrc=0.04*sin(2*PI*997*t)|0.04*sin(2*PI*997*t):s=48000" \
+              -c:a aac -b:a 192k \
+              -ac 2 \
+              -t "$SELF_TEST_SECONDS" \
+              "$OUTFILE"
+        fi
     fi
 
     print_self_test_report
@@ -287,9 +411,7 @@ if [ "$SELF_TEST" -eq 1 ]; then
 fi
 
 # --- Verify Signal is running ---
-if ! pw-link -o 2>/dev/null | grep -q "${SIGNAL_NODE}:output_FL"; then
-    echo "ERROR: Signal call not detected (no ringrtc output found)."
-    echo "Start a Signal call first, then run this script."
+if ! find_signal_sink_input; then
     exit 1
 fi
 
@@ -299,39 +421,61 @@ echo "Output: $OUTFILE"
 echo "------------------------------------------------"
 
 # --- Create virtual sink for Signal ---
-if ! pactl list short sinks | grep -q "$VIRTUAL_SINK"; then
-    pactl load-module module-null-sink \
+if ! pactl list short sinks | awk '{print $2}' | grep -qx "$VIRTUAL_SINK"; then
+    SINK_MODULE_ID=$(pactl load-module module-null-sink \
         sink_name="$VIRTUAL_SINK" \
-        sink_properties=device.description="Signal_Recording_Sink" >/dev/null
-    LOADED_SINK=1
+        sink_properties=device.description="Signal_Recording_Sink" 2>/dev/null)
+    if [ -z "$SINK_MODULE_ID" ]; then
+        echo "ERROR: Failed to create virtual sink ${VIRTUAL_SINK}."
+        exit 1
+    fi
     echo "Virtual sink created"
 else
     echo "Virtual sink already exists"
 fi
 
-# --- Rewire Signal through virtual sink ---
-pw-link -d "${SIGNAL_NODE}:output_FL" "${SPEAKER}:playback_FL" 2>/dev/null
-pw-link -d "${SIGNAL_NODE}:output_FR" "${SPEAKER}:playback_FR" 2>/dev/null
+existing_loopback_id=$(find_existing_module_id "module-loopback" "source=${VIRTUAL_SINK}.monitor")
+if [ -n "$existing_loopback_id" ]; then
+    echo "Monitor loopback already exists (module ${existing_loopback_id})"
+else
+    LOOPBACK_MODULE_ID=$(pactl load-module module-loopback \
+        source="${VIRTUAL_SINK}.monitor" \
+        sink="$SPEAKER" \
+        latency_msec=1 2>/dev/null)
+    if [ -z "$LOOPBACK_MODULE_ID" ]; then
+        echo "ERROR: Failed to create monitor loopback to ${SPEAKER}."
+        exit 1
+    fi
+    echo "Monitor loopback created"
+fi
 
-pw-link "${SIGNAL_NODE}:output_FL" "${VIRTUAL_SINK}:playback_FL"
-pw-link "${SIGNAL_NODE}:output_FR" "${VIRTUAL_SINK}:playback_FR"
+echo "Matched Signal sink-input: ${SIGNAL_SINK_INPUT_ID}"
+echo "Original sink: ${SIGNAL_ORIGINAL_SINK}"
+echo "Current volume: ${SIGNAL_SINK_INPUT_VOLUME}"
+echo "Match details: ${SIGNAL_MATCH_DESC}"
+echo "Recording sink: ${VIRTUAL_SINK}"
+echo "Resolved mic mode: ${MIC_MODE} -> $([ "$FINAL_MIC_ON" -eq 1 ] && echo on || echo off)"
 
-pw-link "${VIRTUAL_SINK}:monitor_FL" "${SPEAKER}:playback_FL"
-pw-link "${VIRTUAL_SINK}:monitor_FR" "${SPEAKER}:playback_FR"
-REWIRED=1
+if ! pactl move-sink-input "$SIGNAL_SINK_INPUT_ID" "$VIRTUAL_SINK" 2>/dev/null; then
+    echo "ERROR: Failed to move Signal sink-input ${SIGNAL_SINK_INPUT_ID} to ${VIRTUAL_SINK}."
+    exit 1
+fi
 echo "Signal audio isolated (other apps unaffected)"
 
 # --- Load echo cancellation for mic ---
 if [ "$FINAL_MIC_ON" -eq 1 ]; then
     if ! pactl list short modules | grep -q module-echo-cancel; then
-        pactl load-module module-echo-cancel \
+        ECHO_MODULE_ID=$(pactl load-module module-echo-cancel \
             source_name=echocancel_source \
             sink_name=echocancel_sink \
             source_master="$ORIGINAL_MIC" \
             aec_method=webrtc \
             aec_args="analog_gain_control=0 digital_gain_control=1" \
-            use_master_format=1 >/dev/null
-        LOADED_EC=1
+            use_master_format=1 2>/dev/null)
+        if [ -z "$ECHO_MODULE_ID" ]; then
+            echo "ERROR: Failed to load echo cancellation."
+            exit 1
+        fi
         echo "Echo cancellation loaded"
     else
         echo "Echo cancel module already loaded"
@@ -346,8 +490,8 @@ echo "------------------------------------------------"
 # --- Record: Signal audio (virtual sink monitor) + your mic ---
 if [ "$FINAL_MIC_ON" -eq 1 ]; then
     ffmpeg -stats -y \
-      -f pulse -sample_rate 48000 -i "${VIRTUAL_SINK}.monitor" \
-      -f pulse -sample_rate 48000 -i "echocancel_source" \
+      -f pulse -i "${VIRTUAL_SINK}.monitor" \
+      -f pulse -i "echocancel_source" \
       -filter_complex "$MIX_FILTER" \
       -c:a aac -b:a 192k \
       -ac 2 \
@@ -355,8 +499,7 @@ if [ "$FINAL_MIC_ON" -eq 1 ]; then
       "$OUTFILE"
 else
     ffmpeg -stats -y \
-      -f pulse -sample_rate 48000 -i "${VIRTUAL_SINK}.monitor" \
-      -filter_complex "$MIX_FILTER" \
+      -f pulse -i "${VIRTUAL_SINK}.monitor" \
       -c:a aac -b:a 192k \
       -ac 2 \
       -t 02:30:00 \

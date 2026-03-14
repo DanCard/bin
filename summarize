@@ -10,9 +10,10 @@ import psutil
 
 # Configuration
 LLAMA_SERVER_BIN = os.path.expanduser("~/github/llama.cpp/build/bin/llama-server")
-MODEL_PATH = os.path.expanduser(
-    "~/llms/qwen3/coder-next-no-bf16/Qwen3-Coder-Next-Q8_0-00001-of-00004.gguf"
-)
+MODELS = {
+    "coder-next": os.path.expanduser("~/llms/qwen3/coder-next-no-bf16/Qwen3-Coder-Next-Q8_0-00001-of-00004.gguf"),
+    "qwen3.5": os.path.expanduser("~/llms/qwen3/3.5/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf")
+}
 LLAMA_URL = "http://localhost:8080"
 DEFAULT_MAX_TOKENS = -1
 LOG_PATH = "/tmp/llama-server.log"
@@ -48,7 +49,7 @@ def is_process_running(name):
     return False
 
 
-def start_server():
+def start_server(model_path):
     """Start the llama-server in the background if it's not already running."""
     if is_server_running(LLAMA_URL):
         print("✅ Llama-server is already running and responding.")
@@ -60,7 +61,7 @@ def start_server():
         print("🚀 Llama-server is not running. Starting it now...")
         cmd = [
             LLAMA_SERVER_BIN,
-            "-m", MODEL_PATH,
+            "-m", model_path,
             "-ngl", "999",
             "-c", "131072",
             "-fa", "on",
@@ -100,7 +101,7 @@ def start_server():
     return False
 
 
-def generate_summary(transcript_path, output_path, max_tokens, url):
+def generate_summary(transcript_path, output_path, max_tokens, url, agent):
     """Send the transcript to the server and stream the response to a file."""
     if not os.path.exists(transcript_path):
         print(f"❌ Error: File not found: {transcript_path}")
@@ -153,15 +154,15 @@ def generate_summary(transcript_path, output_path, max_tokens, url):
                             continue
         
         print(f"✅ Summary saved to: {output_path}")
-        create_google_doc(output_path)
+        create_google_doc(output_path, agent)
 
     except requests.exceptions.RequestException as e:
         print(f"\n❌ Error calling llama-server: {e}")
 
 
-def create_google_doc(file_path):
-    """Uses the Gemini CLI to create a Google Doc from the markdown file."""
-    print(f"📁 Creating Google Doc in defensetech account...")
+def create_google_doc(file_path, agent):
+    """Uses the specified CLI agent to create a Google Doc from the markdown file."""
+    print(f"📁 Creating Google Doc in defensetech account using {agent}...")
     try:
         # 1. Switch auth to defensetech
         switch_script = os.path.expanduser("~/.gemini/switch_auth.sh")
@@ -172,7 +173,7 @@ def create_google_doc(file_path):
             stderr=subprocess.DEVNULL
         )
 
-        # 2. Use gemini CLI to create the doc
+        # 2. Use chosen CLI to create the doc
         abs_path = os.path.abspath(file_path)
         prompt = (
             f"Create a Google Doc from the markdown file '{abs_path}' using its "
@@ -180,9 +181,9 @@ def create_google_doc(file_path):
             "Include a clickable link to the new doc."
         )
         
-        # Run gemini command without shell=True for safety
-        subprocess.run(["gemini", "--approval-mode", "auto_edit", prompt], check=True)
-        print(f"✅ Google Doc creation request sent.")
+        # Run command without shell=True for safety
+        subprocess.run([agent, "--approval-mode", "auto_edit", prompt], check=True)
+        print(f"✅ Google Doc creation request sent via {agent}.")
 
     except subprocess.CalledProcessError as e:
         print(f"⚠️ Warning: Could not create Google Doc automatically: {e}")
@@ -209,6 +210,19 @@ def main():
         default=LLAMA_URL,
         help=f"llama-server URL (default: {LLAMA_URL})."
     )
+    parser.add_argument(
+        "--agent",
+        choices=["gemini", "opencode"],
+        default="opencode",
+        help="CLI agent to use for creating the Google Doc (default: opencode)."
+    )
+
+    parser.add_argument(
+        "--model",
+        choices=["qwen3.5", "coder-next"],
+        default="qwen3.5",
+        help="Model to use for summarization (default: qwen3.5)."
+    )
 
     args = parser.parse_args()
 
@@ -217,11 +231,12 @@ def main():
         args.output = args.transcript + ".md"
 
     # 1. Ensure server is running
-    if not start_server():
+    model_path = MODELS[args.model]
+    if not start_server(model_path):
         sys.exit(1)
 
     # 2. Generate summary
-    generate_summary(args.transcript, args.output, args.max_tokens, args.url)
+    generate_summary(args.transcript, args.output, args.max_tokens, args.url, args.agent)
 
 
 if __name__ == "__main__":
