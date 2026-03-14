@@ -57,11 +57,6 @@ Environment:
 EOF
 }
 
-if [ "${INHIBIT_SLEEP_ACTIVE:-0}" != "1" ] && command -v inhibit-sleep >/dev/null 2>&1; then
-    export INHIBIT_SLEEP_ACTIVE=1
-    exec inhibit-sleep "$0" "$@"
-fi
-
 SELF_TEST=0
 SELF_TEST_SECONDS="$SIGNAL_SELF_TEST_SECONDS"
 MIC_MODE="$SIGNAL_MIC_MODE"

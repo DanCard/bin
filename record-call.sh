@@ -32,10 +32,6 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 NAME=${1:-call}
 OUTFILE="${NAME}-${TIMESTAMP}.m4a"
 
-if [ "${INHIBIT_SLEEP_ACTIVE:-0}" != "1" ] && command -v inhibit-sleep >/dev/null 2>&1; then
-    exec inhibit-sleep "$0" "$@"
-fi
-
 echo "------------------------------------------------"
 echo "RECORDING STARTED (all system audio + mic)"
 echo "Output: $OUTFILE"

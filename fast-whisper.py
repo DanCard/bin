@@ -1,7 +1,6 @@
 #!/home/dcar/.venvs/transcribe/bin/python
 import os
 import sys
-import shutil
 
 # PyTorch bundles MIOpen without gfx1151 support. The amdrocm 7.11 packages
 # provide a MIOpen with gfx1151 kernels. LD_PRELOAD it before torch loads.
@@ -25,7 +24,6 @@ from pyannote.core import Segment
 
 _WHISPER_MODULE = None
 FILE_TAG = "fast-whisper"
-SLEEP_INHIBIT_ENV = "INHIBIT_SLEEP_ACTIVE"
 
 
 def get_output_paths(audio_file, output_dir):
@@ -70,27 +68,6 @@ def print_startup_overview(audio_file, output_dir, args, device, fp16):
         f"Diarization cache: {cache_diarize}",
     ]
     print("\n".join(overview_lines), flush=True)
-
-
-def maybe_inhibit_sleep():
-    if os.environ.get(SLEEP_INHIBIT_ENV) == "1":
-        return
-
-    sleep_guard = shutil.which("inhibit-sleep")
-    if sleep_guard is None:
-        logging.warning("inhibit-sleep helper not found; continuing without sleep inhibition.")
-        return
-
-    logging.info("Re-running under inhibit-sleep to prevent sleep while transcription runs.")
-    os.execvp(
-        sleep_guard,
-        [
-            sleep_guard,
-            sys.executable,
-            os.path.abspath(sys.argv[0]),
-            *sys.argv[1:],
-        ],
-    )
 
 
 def load_whisper_module():
@@ -343,7 +320,6 @@ def main():
     device = "cuda"
     fp16 = True if args.fp16 is None else args.fp16
     setup_logging(audio_file, output_dir)
-    maybe_inhibit_sleep()
     hf_token = check_env()
     print_startup_overview(audio_file, output_dir, args, device, fp16)
     logging.info(f"Using inference device: {device}")
