@@ -253,9 +253,21 @@ cleanup() {
     echo -e "\n------------------------------------------------"
     echo "Cleaning up..."
 
-    if [ -n "$SIGNAL_SINK_INPUT_ID" ] && [ -n "$SIGNAL_ORIGINAL_SINK" ]; then
-        pactl move-sink-input "$SIGNAL_SINK_INPUT_ID" "$SIGNAL_ORIGINAL_SINK" 2>/dev/null && \
-            echo "  Signal sink-input restored to sink ${SIGNAL_ORIGINAL_SINK}"
+    # Restore Signal stream to original sink via pw-metadata, then let
+    # module unload handle any remaining rerouting automatically
+    if [ -n "$SIGNAL_SINK_INPUT_ID" ]; then
+        ringrtc_node_id=$(pw-dump 2>/dev/null | python3 -c "
+import sys, json
+target_serial = '${SIGNAL_SINK_INPUT_ID}'
+for o in json.load(sys.stdin):
+    props = o.get('info', {}).get('props', {})
+    if str(props.get('object.serial', '')) == target_serial and props.get('node.name') == 'ringrtc':
+        print(o['id']); break
+" 2>/dev/null)
+        if [ -n "$ringrtc_node_id" ]; then
+            pw-metadata "$ringrtc_node_id" target.node -1 2>/dev/null && \
+                echo "  Signal stream released to default routing"
+        fi
     fi
 
     if [ -n "$LOOPBACK_MODULE_ID" ]; then
@@ -436,7 +448,7 @@ else
     LOOPBACK_MODULE_ID=$(pactl load-module module-loopback \
         source="${VIRTUAL_SINK}.monitor" \
         sink="$SPEAKER" \
-        latency_msec=1 2>/dev/null)
+        latency_msec=100 2>/dev/null)
     if [ -z "$LOOPBACK_MODULE_ID" ]; then
         echo "ERROR: Failed to create monitor loopback to ${SPEAKER}."
         exit 1
@@ -451,8 +463,47 @@ echo "Match details: ${SIGNAL_MATCH_DESC}"
 echo "Recording sink: ${VIRTUAL_SINK}"
 echo "Resolved mic mode: ${MIC_MODE} -> $([ "$FINAL_MIC_ON" -eq 1 ] && echo on || echo off)"
 
-if ! pactl move-sink-input "$SIGNAL_SINK_INPUT_ID" "$VIRTUAL_SINK" 2>/dev/null; then
-    echo "ERROR: Failed to move Signal sink-input ${SIGNAL_SINK_INPUT_ID} to ${VIRTUAL_SINK}."
+# Move Signal's stream to the virtual sink via PipeWire metadata
+# (pactl move-sink-input is blocked by node.dont-reconnect on ringrtc streams)
+move_signal_to_sink() {
+    local sink_node_id ringrtc_node_id
+    sink_node_id=$(pw-dump 2>/dev/null | python3 -c "
+import sys, json
+for o in json.load(sys.stdin):
+    props = o.get('info', {}).get('props', {})
+    if props.get('node.name') == 'signal_sink':
+        print(o['id']); break
+")
+    ringrtc_node_id=$(pw-dump 2>/dev/null | python3 -c "
+import sys, json
+# Match by pulse sink-input serial to get the exact ringrtc node
+target_serial = '${SIGNAL_SINK_INPUT_ID}'
+for o in json.load(sys.stdin):
+    props = o.get('info', {}).get('props', {})
+    serial = str(props.get('object.serial', ''))
+    if serial == target_serial and props.get('node.name') == 'ringrtc':
+        print(o['id']); break
+# Fallback: first ringrtc node
+" 2>/dev/null)
+    if [ -z "$ringrtc_node_id" ]; then
+        ringrtc_node_id=$(pw-dump 2>/dev/null | python3 -c "
+import sys, json
+for o in json.load(sys.stdin):
+    props = o.get('info', {}).get('props', {})
+    if props.get('node.name') == 'ringrtc':
+        print(o['id']); break
+")
+    fi
+    if [ -z "$sink_node_id" ] || [ -z "$ringrtc_node_id" ]; then
+        echo "ERROR: Could not resolve PipeWire node IDs (sink=${sink_node_id:-?}, ringrtc=${ringrtc_node_id:-?})."
+        return 1
+    fi
+    echo "Moving ringrtc node ${ringrtc_node_id} -> signal_sink node ${sink_node_id}"
+    pw-metadata "$ringrtc_node_id" target.node "$sink_node_id" 2>/dev/null
+}
+
+if ! move_signal_to_sink; then
+    echo "ERROR: Failed to move Signal stream to ${VIRTUAL_SINK}."
     exit 1
 fi
 echo "Signal audio isolated (other apps unaffected)"
