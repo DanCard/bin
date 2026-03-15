@@ -47,7 +47,7 @@ TOP_PROCS_MIN_WIDTH=$((TOP_N * (7 + PROC_NAME_WIDTH) + ((TOP_N - 1) * 2)))
 # - 🏃E SIGUSR1 burst complete
 # - 🌀N  level-based burst frequency set/changed (N = level 2-5)
 # - 🌀E level-based burst complete
-RESUME_DETECT_GRACE_MS=30000
+RESUME_DETECT_THRESHOLD_MS=45000
 MANUAL_BURST_LEVEL=2
 BURST_PHASE1_INTERVAL=5
 BURST_PHASE1_DURATION_MS=45000
@@ -762,7 +762,6 @@ while true; do
     TOP_PROCESSES=$(get_top_procs "$TOP_SAMPLE_DELAY")
     SAMPLE_END_MILLISECONDS=$(date +%s%3N)
     SAMPLE_ELAPSED_MILLISECONDS=$((SAMPLE_END_MILLISECONDS - SAMPLE_START_MILLISECONDS))
-    RESUME_DETECT_THRESHOLD_MS=$((TOP_SAMPLE_DELAY * 1000 + RESUME_DETECT_GRACE_MS))
     if (( SAMPLE_ELAPSED_MILLISECONDS > RESUME_DETECT_THRESHOLD_MS )); then
         # Visually separate telemetry around suspend/resume boundaries.
         printf "\n" >> "$LOG_DIR/$LOG_PREFIX-$LOG_DATE.log"
