@@ -613,11 +613,12 @@ get_top_procs() {
                     command_args = (command_args == "" ? command_parts[i] : command_args " " command_parts[i]);
                 }
                 
-                # Clean up binary (basename)
+                # Clean up binary (basename). Preserve kernel thread names like
+                # irq/9-acpi; only strip true filesystem paths that start with /.
                 if (binary_name ~ /^\[/) {
                     # Kernel thread: strip brackets
                     gsub(/[\[\]]/, "", binary_name);
-                } else {
+                } else if (binary_name ~ /^\//) {
                     sub(/.*\/+/, "", binary_name);
                 }
                 
