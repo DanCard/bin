@@ -575,7 +575,10 @@ get_top_procs() {
     # Use top in batch mode for an N-second average.
     # We use -n 2 because the first iteration is the lifetime average.
     # The second iteration reflects activity over the sample delay (-d N).
-    top -b -n 2 -d "$top_sample_delay" -w 512 -c \
+    # Avoid collecting oversized full command lines here. The previous
+    # combination of `-c` with a wide output format could spike memory enough
+    # for the service to be OOM-killed under pressure.
+    top -b -n 2 -d "$top_sample_delay" -w 256 \
         | awk -v top_n="$TOP_N" -v name_width="$PROC_NAME_WIDTH" '
             # Skip to the second iteration of top
             /^top - / { iteration++; next }
