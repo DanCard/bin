@@ -34,6 +34,8 @@ LOG_RETENTION_DAYS=180
 LOG_PREFIX="sys-logging"
 EC_PATH="/sys/class/ec_su_axb35"
 DEFAULT_TOP_SAMPLE_DELAY=29
+SCREEN_OFF_SAMPLE_DELAY=60
+SCREEN_OFF_THRESHOLD_MS=60000
 LOOP_SAFETY_SLEEP=0.1
 START_EVENT_CODE="▷"
 RESUME_EVENT_CODE="⚡"
@@ -70,6 +72,7 @@ BURST_PHASE2_UNTIL_MS=0
 BURST_PHASE3_UNTIL_MS=0
 BURST_RESULT_UNTIL_MS=0
 BURST_RESULT_INTERVAL=""
+SCREEN_OFF_SINCE_MS=0
 
 mkdir -p "$LOG_DIR"
 # Separate past and present logs if the log file already exists.
@@ -659,6 +662,31 @@ get_top_procs() {
             }'
 }
 
+get_display_power_state() {
+    local display_value xauthority_value xset_output
+
+    command -v xset >/dev/null 2>&1 || {
+        printf "unknown"
+        return
+    }
+
+    display_value="${DISPLAY:-:0}"
+    xauthority_value="${XAUTHORITY:-$HOME/.Xauthority}"
+    if [[ -r "$xauthority_value" ]]; then
+        xset_output=$(DISPLAY="$display_value" XAUTHORITY="$xauthority_value" xset q 2>/dev/null)
+    else
+        xset_output=$(DISPLAY="$display_value" xset q 2>/dev/null)
+    fi
+
+    if [[ "$xset_output" == *"Monitor is Off"* ]]; then
+        printf "off"
+    elif [[ "$xset_output" == *"Monitor is On"* ]]; then
+        printf "on"
+    else
+        printf "unknown"
+    fi
+}
+
 load_event_markers
 enqueue_event_marker "$START_EVENT_CODE"
 STARTUP_CURRENT_TIME_MS=$(date +%s%3N)
@@ -738,6 +766,17 @@ while true; do
         TOP_SAMPLE_DELAY="$ACTIVE_BURST_INTERVAL_OVERRIDE"
     elif (( ACTIVE_BURST_LEVEL >= 2 && ACTIVE_BURST_LEVEL <= 5 )); then
         TOP_SAMPLE_DELAY=$(get_burst_interval_for_level "$ACTIVE_BURST_LEVEL")
+    else
+        DISPLAY_POWER_STATE=$(get_display_power_state)
+        if [[ "$DISPLAY_POWER_STATE" == "off" ]]; then
+            if (( SCREEN_OFF_SINCE_MS == 0 )); then
+                SCREEN_OFF_SINCE_MS=$CURRENT_TIME_MS
+            elif (( CURRENT_TIME_MS - SCREEN_OFF_SINCE_MS >= SCREEN_OFF_THRESHOLD_MS )); then
+                TOP_SAMPLE_DELAY="$SCREEN_OFF_SAMPLE_DELAY"
+            fi
+        else
+            SCREEN_OFF_SINCE_MS=0
+        fi
     fi
 
     CURRENT_BURST_SOURCE=""
