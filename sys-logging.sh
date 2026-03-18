@@ -827,10 +827,28 @@ while true; do
     TOP_PROCESSES=$(get_top_procs "$TOP_SAMPLE_DELAY")
     SAMPLE_END_MILLISECONDS=$(date +%s%3N)
     SAMPLE_ELAPSED_MILLISECONDS=$((SAMPLE_END_MILLISECONDS - SAMPLE_START_MILLISECONDS))
+
+    # Re-check screen state after top completes to catch transitions during sampling.
+    POST_TOP_DISPLAY_STATE=$(get_display_power_state)
+    if [[ -n "$LAST_SCREEN_STATE" && "$POST_TOP_DISPLAY_STATE" != "$LAST_SCREEN_STATE" ]]; then
+        if [[ "$POST_TOP_DISPLAY_STATE" == "off" ]]; then
+            enqueue_event_marker "$SCREEN_OFF_EVENT_CODE"
+        elif [[ "$POST_TOP_DISPLAY_STATE" == "on" ]]; then
+            enqueue_event_marker "$SCREEN_ON_EVENT_CODE"
+        fi
+        LAST_SCREEN_STATE="$POST_TOP_DISPLAY_STATE"
+    fi
+
     if (( SAMPLE_ELAPSED_MILLISECONDS > RESUME_DETECT_THRESHOLD_MS )); then
         # Visually separate telemetry around suspend/resume boundaries.
         printf "\n" >> "$LOG_DIR/$LOG_PREFIX-$LOG_DATE.log"
         enqueue_event_marker "$RESUME_EVENT_CODE"
+        # If screen was on before suspend, it must have turned off — inject □ before ⚡.
+        if [[ "$LAST_SCREEN_STATE" == "on" ]]; then
+            EVENT_MARKERS="${SCREEN_OFF_EVENT_CODE} ${EVENT_MARKERS}"
+            persist_event_markers
+            LAST_SCREEN_STATE="off"
+        fi
         # Only burst-log on resume when the screen is on.
         # When the screen is off, the system is likely in a sleep/wake cycle
         # and burst logging would prevent it from staying asleep.
