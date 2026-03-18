@@ -31,7 +31,8 @@ SIGNAL_NODE="ringrtc"       # Signal's WebRTC node name, used for mic auto-detec
 VIRTUAL_SINK="signal_sink"  # Name for the virtual sink we create
 
 # Tunable gain for diagnostics and optional mic trim:
-SIGNAL_REMOTE_GAIN_DB="${SIGNAL_REMOTE_GAIN_DB:-0}"
+SIGNAL_REMOTE_GAIN_DB_SET="${SIGNAL_REMOTE_GAIN_DB+yes}"
+SIGNAL_REMOTE_GAIN_DB="${SIGNAL_REMOTE_GAIN_DB:-30}"
 SIGNAL_MIC_GAIN_DB="${SIGNAL_MIC_GAIN_DB:-0}"
 # Self-test recording length in seconds (override per run if needed):
 SIGNAL_SELF_TEST_SECONDS="${SIGNAL_SELF_TEST_SECONDS:-25}"
@@ -215,11 +216,21 @@ build_live_mix_filter() {
         return
     fi
 
-    if [ "${SIGNAL_MIC_GAIN_DB}" = "0" ]; then
-        MIX_FILTER="[0:a][1:a]amix=inputs=2:duration=longest:normalize=0"
-    else
-        MIX_FILTER="[1:a]volume=${SIGNAL_MIC_GAIN_DB}dB[mic];[0:a][mic]amix=inputs=2:duration=longest:normalize=0"
+    local remote_part="[0:a]"
+    local remote_label="[0:a]"
+    local mic_part="[1:a]"
+    local mic_label="[1:a]"
+
+    if [ "${SIGNAL_REMOTE_GAIN_DB}" != "0" ]; then
+        remote_part="[0:a]volume=${SIGNAL_REMOTE_GAIN_DB}dB[remote]"
+        remote_label="[remote]"
     fi
+    if [ "${SIGNAL_MIC_GAIN_DB}" != "0" ]; then
+        mic_part="[1:a]volume=${SIGNAL_MIC_GAIN_DB}dB[mic]"
+        mic_label="[mic]"
+    fi
+
+    MIX_FILTER="${remote_part};${mic_part};${remote_label}${mic_label}amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.95"
 }
 
 build_self_test_filter() {
@@ -317,6 +328,11 @@ elif [ "$MIC_MODE" = "auto" ]; then
 else
     FINAL_MIC_ON=1
     echo "MIC MODE: ON"
+fi
+
+# Self-test tones are pre-calibrated; only apply remote gain if user explicitly set it
+if [ "$SELF_TEST" -eq 1 ] && [ "$SIGNAL_REMOTE_GAIN_DB_SET" != "yes" ]; then
+    SIGNAL_REMOTE_GAIN_DB=0
 fi
 
 MIX_FILTER=""
@@ -546,6 +562,7 @@ if [ "$FINAL_MIC_ON" -eq 1 ]; then
 else
     ffmpeg -stats -y \
       -f pulse -i "${VIRTUAL_SINK}.monitor" \
+      -af "volume=${SIGNAL_REMOTE_GAIN_DB}dB,alimiter=limit=0.95" \
       -c:a aac -b:a 192k \
       -ac 2 \
       -t 02:30:00 \

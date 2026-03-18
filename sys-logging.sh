@@ -36,11 +36,14 @@ EC_PATH="/sys/class/ec_su_axb35"
 DEFAULT_TOP_SAMPLE_DELAY=29
 SCREEN_OFF_SAMPLE_DELAY=60
 SCREEN_OFF_THRESHOLD_MS=60000
+EMULATOR_KILL_THRESHOLD_MS=180000
 LOOP_SAFETY_SLEEP=0.1
 START_EVENT_CODE="▷"
 RESUME_EVENT_CODE="⚡"
 USER_BURST_EVENT_CODE="🏃"
 BURST_EVENT_CODE="🌀"
+SCREEN_ON_EVENT_CODE="■"
+SCREEN_OFF_EVENT_CODE="□"
 TOP_PROCS_MIN_WIDTH=$((TOP_N * (7 + PROC_NAME_WIDTH) + ((TOP_N - 1) * 2)))
 # Event markers are appended to the next telemetry line:
 # - ▷   service start
@@ -49,7 +52,9 @@ TOP_PROCS_MIN_WIDTH=$((TOP_N * (7 + PROC_NAME_WIDTH) + ((TOP_N - 1) * 2)))
 # - 🏃E SIGUSR1 burst complete
 # - 🌀N  level-based burst frequency set/changed (N = level 2-5)
 # - 🌀E level-based burst complete
-RESUME_DETECT_THRESHOLD_MS=45000
+# - ■   screen turned on
+# - □   screen turned off
+RESUME_DETECT_THRESHOLD_MS=75000
 MANUAL_BURST_LEVEL=2
 BURST_PHASE1_INTERVAL=5
 BURST_PHASE1_DURATION_MS=45000
@@ -73,6 +78,8 @@ BURST_PHASE3_UNTIL_MS=0
 BURST_RESULT_UNTIL_MS=0
 BURST_RESULT_INTERVAL=""
 SCREEN_OFF_SINCE_MS=0
+EMULATOR_KILLED=0
+LAST_SCREEN_STATE=""
 
 mkdir -p "$LOG_DIR"
 # Separate past and present logs if the log file already exists.
@@ -761,21 +768,36 @@ while true; do
         fi
     fi
 
+    DISPLAY_POWER_STATE=$(get_display_power_state)
+    if [[ -n "$LAST_SCREEN_STATE" && "$DISPLAY_POWER_STATE" != "$LAST_SCREEN_STATE" ]]; then
+        if [[ "$DISPLAY_POWER_STATE" == "off" ]]; then
+            enqueue_event_marker "$SCREEN_OFF_EVENT_CODE"
+        elif [[ "$DISPLAY_POWER_STATE" == "on" ]]; then
+            enqueue_event_marker "$SCREEN_ON_EVENT_CODE"
+        fi
+    fi
+    LAST_SCREEN_STATE="$DISPLAY_POWER_STATE"
+
     TOP_SAMPLE_DELAY="$DEFAULT_TOP_SAMPLE_DELAY"
     if [[ -n "$ACTIVE_BURST_INTERVAL_OVERRIDE" ]]; then
         TOP_SAMPLE_DELAY="$ACTIVE_BURST_INTERVAL_OVERRIDE"
     elif (( ACTIVE_BURST_LEVEL >= 2 && ACTIVE_BURST_LEVEL <= 5 )); then
         TOP_SAMPLE_DELAY=$(get_burst_interval_for_level "$ACTIVE_BURST_LEVEL")
     else
-        DISPLAY_POWER_STATE=$(get_display_power_state)
         if [[ "$DISPLAY_POWER_STATE" == "off" ]]; then
             if (( SCREEN_OFF_SINCE_MS == 0 )); then
                 SCREEN_OFF_SINCE_MS=$CURRENT_TIME_MS
             elif (( CURRENT_TIME_MS - SCREEN_OFF_SINCE_MS >= SCREEN_OFF_THRESHOLD_MS )); then
                 TOP_SAMPLE_DELAY="$SCREEN_OFF_SAMPLE_DELAY"
             fi
+            if (( EMULATOR_KILLED == 0 && CURRENT_TIME_MS - SCREEN_OFF_SINCE_MS >= EMULATOR_KILL_THRESHOLD_MS )); then
+                if pkill -f 'qemu-system-x86_64.*-avd' 2>/dev/null; then
+                    EMULATOR_KILLED=1
+                fi
+            fi
         else
             SCREEN_OFF_SINCE_MS=0
+            EMULATOR_KILLED=0
         fi
     fi
 
@@ -809,13 +831,19 @@ while true; do
         # Visually separate telemetry around suspend/resume boundaries.
         printf "\n" >> "$LOG_DIR/$LOG_PREFIX-$LOG_DATE.log"
         enqueue_event_marker "$RESUME_EVENT_CODE"
-        RESUME_TIME_MS=$(date +%s%3N)
-        start_burst_profile "$RESUME_TIME_MS"
-        
-        if (( BURST_RESULT_UNTIL_MS > ACTIVE_BURST_UNTIL_MS )); then
-            ACTIVE_BURST_UNTIL_MS=$BURST_RESULT_UNTIL_MS
+        # Only burst-log on resume when the screen is on.
+        # When the screen is off, the system is likely in a sleep/wake cycle
+        # and burst logging would prevent it from staying asleep.
+        RESUME_DISPLAY_STATE=$(get_display_power_state)
+        if [[ "$RESUME_DISPLAY_STATE" != "off" ]]; then
+            RESUME_TIME_MS=$(date +%s%3N)
+            start_burst_profile "$RESUME_TIME_MS"
+
+            if (( BURST_RESULT_UNTIL_MS > ACTIVE_BURST_UNTIL_MS )); then
+                ACTIVE_BURST_UNTIL_MS=$BURST_RESULT_UNTIL_MS
+            fi
+            ACTIVE_BURST_INTERVAL_OVERRIDE="$BURST_PHASE1_INTERVAL"
         fi
-        ACTIVE_BURST_INTERVAL_OVERRIDE="$BURST_PHASE1_INTERVAL"
     fi
     MINIMUM_SAMPLE_ELAPSED_MS=$((TOP_SAMPLE_DELAY * 1000 - 1000))
     if (( MINIMUM_SAMPLE_ELAPSED_MS < 0 )); then
