@@ -195,6 +195,9 @@ activate_manual_burst() {
 trap 'handle_stop' SIGTERM SIGINT
 trap 'activate_manual_burst' SIGUSR1
 
+# Monitoring (March 2026) confirmed that the EC's temp1 sensor (primary input for
+# hardware fan curves) is functionally identical to the system ACPI sensor
+# on this hardware. Disabled by default to save log width; use -t to re-verify.
 SHOW_ACPI_EC=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
