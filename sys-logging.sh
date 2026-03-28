@@ -8,7 +8,7 @@
 #
 # Signal controls (while service is running):
 #   # Trigger manual burst profile from SIGUSR1
-#   # (defaults: 5s sampling for 45s, then 10s for 50s, then 15s for 60s)
+#   # (defaults: 8s sampling for 45s, then 15s for 50s, then 20s for 60s)
 #   # Use --kill-who=main so the current top sample is not interrupted.
 #   systemctl --user kill -s USR1 --kill-who=main sys-logging.service
 #
@@ -36,8 +36,9 @@ EC_PATH="/sys/class/ec_su_axb35"
 DEFAULT_TOP_SAMPLE_DELAY=29
 SCREEN_OFF_SAMPLE_DELAY=60
 SCREEN_OFF_THRESHOLD_MS=60000
-EMULATOR_KILL_THRESHOLD_MS=300000  # 5 minutes (screen-off before killing emulator)
+EMULATOR_KILL_THRESHOLD_MS=1200000
 LOOP_SAFETY_SLEEP=0.1
+SCREEN_DEBUG=0
 START_EVENT_CODE="▷"
 RESUME_EVENT_CODE="⚡"
 USER_BURST_EVENT_CODE="🏃"
@@ -56,11 +57,11 @@ TOP_PROCS_MIN_WIDTH=$((TOP_N * (7 + PROC_NAME_WIDTH) + ((TOP_N - 1) * 2)))
 # - □   screen turned off
 RESUME_DETECT_THRESHOLD_MS=75000
 MANUAL_BURST_LEVEL=2
-BURST_PHASE1_INTERVAL=5
+BURST_PHASE1_INTERVAL=8
 BURST_PHASE1_DURATION_MS=45000
-BURST_PHASE2_INTERVAL=10
+BURST_PHASE2_INTERVAL=15
 BURST_PHASE2_DURATION_MS=50000
-BURST_PHASE3_INTERVAL=15
+BURST_PHASE3_INTERVAL=20
 BURST_PHASE3_DURATION_MS=60000
 EVENT_QUEUE_FILE=""
 EVENT_MARKERS=""
@@ -80,6 +81,7 @@ BURST_RESULT_INTERVAL=""
 SCREEN_OFF_SINCE_MS=0
 EMULATOR_KILLED=0
 LAST_SCREEN_STATE=""
+SCREEN_DEBUG_FILE=""
 
 mkdir -p "$LOG_DIR"
 # Separate past and present logs if the log file already exists.
@@ -205,6 +207,10 @@ while [[ $# -gt 0 ]]; do
             SHOW_ACPI_EC=1
             shift
             ;;
+        --debug-screen)
+            SCREEN_DEBUG=1
+            shift
+            ;;
         *)
             echo "Unknown argument: $1"
             exit 1
@@ -293,7 +299,7 @@ get_effective_level_from_rpms() {
 get_burst_interval_for_level() {
     local level="$1"
     # Burst logging schedule:
-    # L2: 15s for 60s, L3: 8s for 60s, L4: 4s for 30s, L5: 2s for 16s.
+    # L2: 15s for 90s, L3: 8s for 60s, L4: 6s for 30s, L5: 4s for 16s.
     case "$level" in
         2) printf "15" ;;
         3) printf "8" ;;
@@ -694,12 +700,46 @@ get_display_power_state() {
     fi
 }
 
+log_screen_debug() {
+    local message="$1"
+    (( SCREEN_DEBUG == 1 )) || return
+    printf "%s %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$message" >> "$SCREEN_DEBUG_FILE"
+}
+
+update_screen_state() {
+    local probed_state="$1" probe_context="$2"
+    local previous_state="$LAST_SCREEN_STATE"
+
+    if [[ "$probed_state" != "on" && "$probed_state" != "off" ]]; then
+        log_screen_debug "probe=$probe_context state=$probed_state last=$previous_state"
+        return
+    fi
+
+    if [[ -n "$previous_state" && "$probed_state" != "$previous_state" ]]; then
+        if [[ "$probed_state" == "off" ]]; then
+            enqueue_event_marker "$SCREEN_OFF_EVENT_CODE"
+        else
+            enqueue_event_marker "$SCREEN_ON_EVENT_CODE"
+        fi
+    fi
+
+    LAST_SCREEN_STATE="$probed_state"
+    log_screen_debug "probe=$probe_context state=$probed_state last=$previous_state"
+}
+
 load_event_markers
 enqueue_event_marker "$START_EVENT_CODE"
+SCREEN_DEBUG_FILE="$LOG_DIR/$LOG_PREFIX-screen-debug-$(date '+%Y-%m-%d').log"
 STARTUP_CURRENT_TIME_MS=$(date +%s%3N)
 start_burst_profile "$STARTUP_CURRENT_TIME_MS"
 ACTIVE_BURST_UNTIL_MS=$BURST_RESULT_UNTIL_MS
 ACTIVE_BURST_INTERVAL_OVERRIDE="$BURST_PHASE1_INTERVAL"
+
+INITIAL_SCREEN_STATE=$(get_display_power_state)
+if [[ "$INITIAL_SCREEN_STATE" == "on" || "$INITIAL_SCREEN_STATE" == "off" ]]; then
+    LAST_SCREEN_STATE="$INITIAL_SCREEN_STATE"
+fi
+log_screen_debug "startup state=$INITIAL_SCREEN_STATE"
 
 # Bootstrap fan snapshot so first-loop burst logic has a valid input.
 FAN_STATUS=$(get_fan_mode)
@@ -769,14 +809,7 @@ while true; do
     fi
 
     DISPLAY_POWER_STATE=$(get_display_power_state)
-    if [[ -n "$LAST_SCREEN_STATE" && "$DISPLAY_POWER_STATE" != "$LAST_SCREEN_STATE" ]]; then
-        if [[ "$DISPLAY_POWER_STATE" == "off" ]]; then
-            enqueue_event_marker "$SCREEN_OFF_EVENT_CODE"
-        elif [[ "$DISPLAY_POWER_STATE" == "on" ]]; then
-            enqueue_event_marker "$SCREEN_ON_EVENT_CODE"
-        fi
-    fi
-    LAST_SCREEN_STATE="$DISPLAY_POWER_STATE"
+    update_screen_state "$DISPLAY_POWER_STATE" "pre-top"
 
     TOP_SAMPLE_DELAY="$DEFAULT_TOP_SAMPLE_DELAY"
     if [[ -n "$ACTIVE_BURST_INTERVAL_OVERRIDE" ]]; then
@@ -830,14 +863,7 @@ while true; do
 
     # Re-check screen state after top completes to catch transitions during sampling.
     POST_TOP_DISPLAY_STATE=$(get_display_power_state)
-    if [[ -n "$LAST_SCREEN_STATE" && "$POST_TOP_DISPLAY_STATE" != "$LAST_SCREEN_STATE" ]]; then
-        if [[ "$POST_TOP_DISPLAY_STATE" == "off" ]]; then
-            enqueue_event_marker "$SCREEN_OFF_EVENT_CODE"
-        elif [[ "$POST_TOP_DISPLAY_STATE" == "on" ]]; then
-            enqueue_event_marker "$SCREEN_ON_EVENT_CODE"
-        fi
-        LAST_SCREEN_STATE="$POST_TOP_DISPLAY_STATE"
-    fi
+    update_screen_state "$POST_TOP_DISPLAY_STATE" "post-top"
 
     if (( SAMPLE_ELAPSED_MILLISECONDS > RESUME_DETECT_THRESHOLD_MS )); then
         # Visually separate telemetry around suspend/resume boundaries.

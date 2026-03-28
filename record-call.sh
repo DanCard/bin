@@ -86,14 +86,14 @@ echo "------------------------------------------------"
 #   -c:a aac      = encode as AAC audio codec
 #   -b:a 192k     = 192 kbps bitrate (good quality for voice)
 #   -ac 2         = stereo output
-#   -t 02:30:00   = max recording length 2.5 hours (safety limit)
+#   -t 03:00:00   = max recording length 3 hours (safety limit)
 ffmpeg -stats -y \
   -f pulse -i "$MONITOR" \
   -f pulse -i "echocancel_source" \
   -filter_complex "[0:a][1:a]amix=inputs=2:duration=longest" \
   -c:a aac -b:a 192k \
   -ac 2 \
-  -t 02:30:00 \
+  -t 03:00:00 \
   "$OUTFILE"
 
 # Clean up: unload the echo cancel module if we loaded it
