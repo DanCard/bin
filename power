@@ -1,23 +1,33 @@
 #!/bin/bash
 # Set XFCE power management settings based on DPMS sleep time
 
-# echo "Current settings:"
-sps  # show-power-settings
-
-if [ -z "$1" ]; then
+print_help() {
     echo "Usage: $0 <sleep-minutes> [suspend-minutes]"
     echo ""
     echo "Example: $0 10"
     echo "  Sets DPMS sleep to 10 minutes"
     echo "  Sets DPMS off to 11 minutes (sleep + 1)"
-    echo "  Sets system suspend to 30 minutes (sleep x 3)"
+    echo "  Sets system suspend to 110 minutes (sleep x off)"
     echo ""
     echo "Example: $0 10 60"
     echo "  Sets DPMS sleep to 10 minutes"
     echo "  Sets DPMS off to 11 minutes (sleep + 1)"
     echo "  Sets system suspend to 60 minutes (explicitly)"
-    exit 1
+}
+
+if [ -z "$1" ]; then
+    exec "$HOME/bin/sps"
 fi
+
+case "$1" in
+    -h|--help|help)
+        print_help
+        exit 0
+        ;;
+esac
+
+# echo "Current settings:"
+sps  # show-power-settings
 
 CONFIG_FILE="$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml"
 
