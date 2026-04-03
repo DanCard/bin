@@ -11,10 +11,7 @@ import psutil
 
 # Configuration
 LLAMA_SERVER_BIN = os.path.expanduser("~/github/llama.cpp/build/bin/llama-server")
-MODELS = {
-    "coder-next": os.path.expanduser("~/llms/qwen3/coder-next-no-bf16/Qwen3-Coder-Next-Q8_0-00001-of-00004.gguf"),
-    "qwen3.5": os.path.expanduser("~/llms/qwen3/3.5/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf")
-}
+MODEL_PATH = os.path.expanduser("~/llms/qwen3/3.5/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf")
 LLAMA_URL = "http://localhost:8080"
 DEFAULT_MAX_TOKENS = -1
 LOG_PATH = "/tmp/llama-server.log"
@@ -228,13 +225,6 @@ def main():
         help="CLI agent to use for creating the Google Doc (default: opencode)."
     )
 
-    parser.add_argument(
-        "--model",
-        choices=["qwen3.5", "coder-next"],
-        default="qwen3.5",
-        help="Model to use for summarization (default: qwen3.5)."
-    )
-
     args = parser.parse_args()
 
     # Default output path
@@ -242,8 +232,7 @@ def main():
         args.output = args.transcript + ".md"
 
     # 1. Ensure server is running
-    model_path = MODELS[args.model]
-    if not start_server(model_path):
+    if not start_server(MODEL_PATH):
         sys.exit(1)
 
     # 2. Generate summary
