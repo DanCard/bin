@@ -12,6 +12,7 @@ import psutil
 # Configuration
 LLAMA_SERVER_BIN = os.path.expanduser("~/github/llama.cpp/build/bin/llama-server")
 MODEL_PATH = os.path.expanduser("~/llms/qwen3/3.5/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf")
+MODEL_ID = "llama.cpp/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
 LLAMA_URL = "http://localhost:8080"
 DEFAULT_MAX_TOKENS = -1
 LOG_PATH = "/tmp/llama-server.log"
@@ -114,7 +115,7 @@ def generate_summary(transcript_path, output_path, max_tokens, url, agent):
     print("-" * 40)
 
     payload = {
-        "model": "qwen3",
+        "model": MODEL_ID,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f"{USER_PROMPT_PREFIX}\n\n{transcript}"}
@@ -185,7 +186,7 @@ def create_google_doc(file_path, agent):
         )
 
         if agent == "opencode":
-            cmd = [agent_path, "run", prompt]
+            cmd = [agent_path, "run", "-m", MODEL_ID, prompt]
         else:
             cmd = [agent_path, "--approval-mode", "auto_edit", prompt]
 

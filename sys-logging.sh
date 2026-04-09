@@ -45,7 +45,7 @@ USER_BURST_EVENT_CODE="🏃"
 BURST_EVENT_CODE="🌀"
 SCREEN_ON_EVENT_CODE="■"
 SCREEN_OFF_EVENT_CODE="□"
-TOP_PROCS_MIN_WIDTH=$((TOP_N * (7 + PROC_NAME_WIDTH) + ((TOP_N - 1) * 2)))
+TOP_PROCS_MIN_WIDTH=$((TOP_N * (7 + PROC_NAME_WIDTH) + (TOP_N - 1)))
 # Event markers are appended to the next telemetry line:
 # - ▷   service start
 # - ⚡   resume detected (after suspend/wake)
@@ -656,9 +656,9 @@ get_top_procs() {
                 
                 process_count++;
                 if (process_count < top_n) {
-                    printf "%5s%% %-*s  ", cpu, name_width, process_display_name;
+                    printf "%5s%% %-*s ", cpu, name_width, process_display_name;
                 } else {
-                    printf "%5s%% %-*s", cpu, name_width, process_display_name;
+                    printf "%5s%% %-*s" , cpu, name_width, process_display_name;
                 }
             }
             
@@ -667,9 +667,9 @@ get_top_procs() {
                 while (process_count < top_n) {
                     process_count++;
                     if (process_count < top_n) {
-                        printf "%*s  ", 7 + name_width, "";
+                        printf "%*s ", 7 + name_width, "";
                     } else {
-                        printf "%*s", 7 + name_width, "";
+                        printf "%*s" , 7 + name_width, "";
                     }
                 }
             }'
