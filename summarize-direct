@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import psutil
+import requests
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaFileUpload
+
+# Configuration
+LLAMA_SERVER_BIN = os.path.expanduser("~/github/llama.cpp/build/bin/llama-server")
+MODEL_PATH = os.path.expanduser(
+    "~/llms/qwen3/3.5/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
+)
+MODEL_ID = "llama.cpp/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf"
+LLAMA_URL = "http://localhost:8080"
+DEFAULT_MAX_TOKENS = -1
+LOG_PATH = "/tmp/llama-server.log"
+SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+DEFAULT_CONFIG_DIR = Path.home() / ".config" / "summarize-direct"
+DEFAULT_CLIENT_SECRET = DEFAULT_CONFIG_DIR / "client_secret.json"
+DEFAULT_TOKEN_CACHE = DEFAULT_CONFIG_DIR / "token.json"
+
+SYSTEM_PROMPT = (
+    "You are a strategic meeting analyst. Produce an exhaustive report of the meeting. "
+    "Include all topics discussed, decisions made, action items, who said what, and any "
+    "context or nuance mentioned. Use markdown formatting with headers and bullet points. "
+    "Include quotes and excerpts."
+)
+
+USER_PROMPT_PREFIX = (
+    "Here is the full transcript of a meeting. Write detailed meeting notes covering "
+    "every topic, decisions, action items, and details discussed. Include quotes and "
+    "excerpts."
+)
+
+
+def is_server_running(url):
+    """Check if the server is responding to API requests."""
+    try:
+        response = requests.get(f"{url}/v1/models", timeout=2)
+        return response.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
+
+
+def is_process_running(name):
+    """Check if a process with the given name exists."""
+    for proc in psutil.process_iter(["name"]):
+        if proc.info["name"] == name:
+            return True
+    return False
+
+
+def start_server(model_path):
+    """Start llama-server in the background if it's not already running."""
+    if is_server_running(LLAMA_URL):
+        print("✅ Llama-server is already running and responding.")
+        return True
+
+    if is_process_running("llama-server"):
+        print("⏳ Llama-server process is running but not responding yet. Waiting...")
+    else:
+        print("🚀 Llama-server is not running. Starting it now...")
+        cmd = [
+            LLAMA_SERVER_BIN,
+            "-m",
+            model_path,
+            "-ngl",
+            "999",
+            "-c",
+            "131072",
+            "-fa",
+            "on",
+            "-ctk",
+            "q8_0",
+            "-ctv",
+            "q8_0",
+            "--no-mmap",
+            "--temp",
+            "0",
+        ]
+
+        print(f"📡 Command issued: {' '.join(cmd)}")
+        print(f"📝 Logs are being written to {LOG_PATH}")
+
+        try:
+            with open(LOG_PATH, "a", encoding="utf-8") as log_file:
+                subprocess.Popen(
+                    cmd,
+                    stdout=log_file,
+                    stderr=log_file,
+                    start_new_session=True,
+                )
+        except Exception as exc:
+            print(f"❌ Error starting llama-server process: {exc}")
+            return False
+
+    print("⌛ Waiting for server to become ready (this may take a minute)...")
+    start_time = time.time()
+    while time.time() - start_time < 300:
+        if is_server_running(LLAMA_URL):
+            print("\n✅ Llama-server is ready!")
+            return True
+        print(".", end="", flush=True)
+        time.sleep(2)
+
+    print("\n❌ Error: Timeout waiting for llama-server to start.")
+    return False
+
+
+def generate_summary(transcript_path, output_path, max_tokens, url):
+    """Send the transcript to llama-server and stream the response to a file."""
+    if not os.path.exists(transcript_path):
+        print(f"❌ Error: File not found: {transcript_path}")
+        return False
+
+    with open(transcript_path, "r", encoding="utf-8", errors="replace") as f_in:
+        transcript = f_in.read()
+
+    print(f"📖 Read transcript from {transcript_path} ({len(transcript)} chars)")
+    print(f"📝 Generating meeting notes → {output_path}")
+    print(f"💡 Monitor progress in another terminal: tail -f '{output_path}'")
+    print("-" * 40)
+
+    payload = {
+        "model": MODEL_ID,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"{USER_PROMPT_PREFIX}\n\n{transcript}"},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0,
+        "stream": True,
+    }
+
+    try:
+        response = requests.post(
+            f"{url}/v1/chat/completions",
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            stream=True,
+        )
+        response.raise_for_status()
+
+        with open(output_path, "w", encoding="utf-8") as f_out:
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                decoded_line = line.decode("utf-8")
+                if not decoded_line.startswith("data: "):
+                    continue
+                data_str = decoded_line[len("data: ") :]
+                if data_str.strip() == "[DONE]":
+                    break
+                try:
+                    data = json.loads(data_str)
+                    content = data["choices"][0]["delta"].get("content", "")
+                except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                    continue
+                if content:
+                    f_out.write(content)
+                    f_out.flush()
+
+        print(f"✅ Summary saved to: {output_path}")
+        return True
+
+    except requests.exceptions.RequestException as exc:
+        print(f"\n❌ Error calling llama-server: {exc}")
+        return False
+
+
+def extract_doc_title(file_path):
+    """Use the first markdown heading as the Google Doc title when available."""
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f_in:
+        for raw_line in f_in:
+            line = raw_line.strip()
+            if line.startswith("#"):
+                title = line.lstrip("#").strip()
+                if title:
+                    return title
+    return Path(file_path).stem
+
+
+def load_credentials(client_secret_path, token_cache_path):
+    """Load cached OAuth credentials or run the local browser flow once."""
+    creds = None
+    token_cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if token_cache_path.exists():
+        creds = Credentials.from_authorized_user_file(str(token_cache_path), SCOPES)
+
+    if creds and creds.valid:
+        return creds
+
+    if creds and creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+    else:
+        if not client_secret_path.exists():
+            raise FileNotFoundError(
+                "Google OAuth client secret not found. "
+                f"Expected: {client_secret_path}"
+            )
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(client_secret_path),
+            SCOPES,
+        )
+        creds = flow.run_local_server(port=0)
+
+    token_cache_path.write_text(creds.to_json(), encoding="utf-8")
+    return creds
+
+
+def create_google_doc(markdown_path, client_secret_path, token_cache_path):
+    """Upload a markdown file and request conversion to a Google Doc."""
+    print("📁 Creating Google Doc via Drive API...")
+
+    title = extract_doc_title(markdown_path)
+    creds = load_credentials(client_secret_path, token_cache_path)
+    service = build("drive", "v3", credentials=creds)
+
+    metadata = {
+        "name": title,
+        "mimeType": "application/vnd.google-apps.document",
+    }
+    media = MediaFileUpload(markdown_path, mimetype="text/markdown", resumable=False)
+
+    try:
+        created = (
+            service.files()
+            .create(
+                body=metadata,
+                media_body=media,
+                fields="id,name,webViewLink,mimeType",
+            )
+            .execute()
+        )
+    except HttpError as exc:
+        raise RuntimeError(f"Google Drive upload failed: {exc}") from exc
+
+    doc_url = created.get("webViewLink") or (
+        f"https://docs.google.com/document/d/{created['id']}/edit"
+    )
+    print(f"✅ Google Doc created: {doc_url}")
+    return doc_url
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate structured meeting notes using a local LLM and upload the markdown to Google Docs."
+    )
+    parser.add_argument("transcript", help="Path to the transcript text file.")
+    parser.add_argument(
+        "output",
+        nargs="?",
+        help="Path to the output markdown file (default: transcript.txt.md).",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=DEFAULT_MAX_TOKENS,
+        help="Max output tokens (default: -1).",
+    )
+    parser.add_argument(
+        "--url",
+        default=LLAMA_URL,
+        help=f"llama-server URL (default: {LLAMA_URL}).",
+    )
+    parser.add_argument(
+        "--google-client-secret",
+        default=str(DEFAULT_CLIENT_SECRET),
+        help=f"Path to Google OAuth client secret JSON (default: {DEFAULT_CLIENT_SECRET}).",
+    )
+    parser.add_argument(
+        "--google-token-cache",
+        default=str(DEFAULT_TOKEN_CACHE),
+        help=f"Path to cached Google OAuth token JSON (default: {DEFAULT_TOKEN_CACHE}).",
+    )
+
+    args = parser.parse_args()
+
+    if not args.output:
+        args.output = args.transcript + ".md"
+
+    if not start_server(MODEL_PATH):
+        sys.exit(1)
+
+    if not generate_summary(args.transcript, args.output, args.max_tokens, args.url):
+        sys.exit(1)
+
+    try:
+        create_google_doc(
+            args.output,
+            Path(os.path.expanduser(args.google_client_secret)),
+            Path(os.path.expanduser(args.google_token_cache)),
+        )
+    except Exception as exc:
+        print(f"⚠️ Warning: Could not create Google Doc automatically: {exc}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -299,12 +299,12 @@ get_effective_level_from_rpms() {
 get_burst_interval_for_level() {
     local level="$1"
     # Burst logging schedule:
-    # L2: 15s for 90s, L3: 8s for 60s, L4: 6s for 30s, L5: 4s for 16s.
+    # L2: 20s for 90s, L3: 16s for 60s, L4: 12s for 30s, L5: 8s for 16s.
     case "$level" in
-        2) printf "15" ;;
-        3) printf "8" ;;
-        4) printf "6" ;;
-        5) printf "4" ;;
+        2) printf "20" ;;
+        3) printf "16" ;;
+        4) printf "12" ;;
+        5) printf "8" ;;
         *) printf "%s" "$DEFAULT_TOP_SAMPLE_DELAY" ;;
     esac
 }

@@ -27,7 +27,7 @@ SYSTEM_PROMPT = (
 USER_PROMPT_PREFIX = (
     "Here is the full transcript of a meeting. Write detailed meeting notes covering "
     "every topic, decisions, action items, and details discussed. Include quotes and "
-    "excerpts."
+    "excerpts.  Include details when a person introduces themselves."
 )
 
 
