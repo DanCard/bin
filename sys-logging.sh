@@ -66,9 +66,6 @@ BURST_PHASE3_DURATION_MS=60000
 EVENT_QUEUE_FILE=""
 EVENT_MARKERS=""
 
-ACTIVE_BURST_LEVEL=0
-ACTIVE_BURST_UNTIL_MS=0
-ACTIVE_BURST_INTERVAL_OVERRIDE=""
 LAST_BURST_DELAY=""
 LAST_BURST_SOURCE=""
 USR1_BURST_UNTIL_MS=0
@@ -179,18 +176,9 @@ get_burst_profile_interval() {
 
 activate_manual_burst() {
     local current_time_ms
-    ACTIVE_BURST_INTERVAL_OVERRIDE=""
     current_time_ms=$(date +%s%3N)
     start_burst_profile "$current_time_ms"
     USR1_BURST_UNTIL_MS=$BURST_RESULT_UNTIL_MS
-
-    if (( MANUAL_BURST_LEVEL > ACTIVE_BURST_LEVEL )); then
-        ACTIVE_BURST_LEVEL=$MANUAL_BURST_LEVEL
-        ACTIVE_BURST_UNTIL_MS=$BURST_RESULT_UNTIL_MS
-    elif (( MANUAL_BURST_LEVEL == ACTIVE_BURST_LEVEL && BURST_RESULT_UNTIL_MS > ACTIVE_BURST_UNTIL_MS )); then
-        ACTIVE_BURST_UNTIL_MS=$BURST_RESULT_UNTIL_MS
-    fi
-
     enqueue_event_marker "${USER_BURST_EVENT_CODE}"
 }
 
@@ -294,30 +282,6 @@ get_effective_level_from_rpms() {
     if (( level2 > max_fan_level )); then max_fan_level="$level2"; fi
     if (( level3 > max_fan_level )); then max_fan_level="$level3"; fi
     printf "%s" "$max_fan_level"
-}
-
-get_burst_interval_for_level() {
-    local level="$1"
-    # Burst logging schedule:
-    # L2: 20s for 90s, L3: 16s for 60s, L4: 12s for 30s, L5: 8s for 16s.
-    case "$level" in
-        2) printf "20" ;;
-        3) printf "16" ;;
-        4) printf "12" ;;
-        5) printf "8" ;;
-        *) printf "%s" "$DEFAULT_TOP_SAMPLE_DELAY" ;;
-    esac
-}
-
-get_burst_duration_ms_for_level() {
-    local level="$1"
-    case "$level" in
-        2) printf "90000" ;;
-        3) printf "60000" ;;
-        4) printf "30000" ;;
-        5) printf "16000" ;;
-        *) printf "0" ;;
-    esac
 }
 
 get_fan_rpms() {
@@ -732,8 +696,6 @@ enqueue_event_marker "$START_EVENT_CODE"
 SCREEN_DEBUG_FILE="$LOG_DIR/$LOG_PREFIX-screen-debug-$(date '+%Y-%m-%d').log"
 STARTUP_CURRENT_TIME_MS=$(date +%s%3N)
 start_burst_profile "$STARTUP_CURRENT_TIME_MS"
-ACTIVE_BURST_UNTIL_MS=$BURST_RESULT_UNTIL_MS
-ACTIVE_BURST_INTERVAL_OVERRIDE="$BURST_PHASE1_INTERVAL"
 
 INITIAL_SCREEN_STATE=$(get_display_power_state)
 if [[ "$INITIAL_SCREEN_STATE" == "on" || "$INITIAL_SCREEN_STATE" == "off" ]]; then
@@ -778,7 +740,6 @@ while true; do
     USR1_BURST_ACTIVE=0
 
     get_burst_profile_interval "$CURRENT_TIME_MS"
-    ACTIVE_BURST_INTERVAL_OVERRIDE="$BURST_RESULT_INTERVAL"
 
     if (( USR1_BURST_UNTIL_MS > CURRENT_TIME_MS )); then
         USR1_BURST_ACTIVE=1
@@ -791,31 +752,18 @@ while true; do
         USR1_BURST_UNTIL_MS=0
     fi
 
-    if (( CURRENT_TIME_MS >= ACTIVE_BURST_UNTIL_MS )); then
-        ACTIVE_BURST_LEVEL=0
-        ACTIVE_BURST_UNTIL_MS=0
-        ACTIVE_BURST_INTERVAL_OVERRIDE=""
-    fi
-
-    if (( EFFECTIVE_FAN_LEVEL >= 2 && EFFECTIVE_FAN_LEVEL <= 5 )); then
-        BURST_DURATION_MILLISECONDS=$(get_burst_duration_ms_for_level "$EFFECTIVE_FAN_LEVEL")
-        CANDIDATE_BURST_UNTIL_MS=$((CURRENT_TIME_MS + BURST_DURATION_MILLISECONDS))
-        if (( EFFECTIVE_FAN_LEVEL > ACTIVE_BURST_LEVEL )); then
-            ACTIVE_BURST_LEVEL=$EFFECTIVE_FAN_LEVEL
-            ACTIVE_BURST_UNTIL_MS=$CANDIDATE_BURST_UNTIL_MS
-        elif (( EFFECTIVE_FAN_LEVEL == ACTIVE_BURST_LEVEL && CANDIDATE_BURST_UNTIL_MS > ACTIVE_BURST_UNTIL_MS )); then
-            ACTIVE_BURST_UNTIL_MS=$CANDIDATE_BURST_UNTIL_MS
-        fi
+    if [[ -z "$BURST_RESULT_INTERVAL" ]] && (( EFFECTIVE_FAN_LEVEL >= 2 && EFFECTIVE_FAN_LEVEL <= 5 )); then
+        start_burst_profile "$CURRENT_TIME_MS"
+        BURST_RESULT_INTERVAL="$BURST_PHASE1_INTERVAL"
+        enqueue_event_marker "${BURST_EVENT_CODE}${EFFECTIVE_FAN_LEVEL}"
     fi
 
     DISPLAY_POWER_STATE=$(get_display_power_state)
     update_screen_state "$DISPLAY_POWER_STATE" "pre-top"
 
     TOP_SAMPLE_DELAY="$DEFAULT_TOP_SAMPLE_DELAY"
-    if [[ -n "$ACTIVE_BURST_INTERVAL_OVERRIDE" ]]; then
-        TOP_SAMPLE_DELAY="$ACTIVE_BURST_INTERVAL_OVERRIDE"
-    elif (( ACTIVE_BURST_LEVEL >= 2 && ACTIVE_BURST_LEVEL <= 5 )); then
-        TOP_SAMPLE_DELAY=$(get_burst_interval_for_level "$ACTIVE_BURST_LEVEL")
+    if [[ -n "$BURST_RESULT_INTERVAL" ]]; then
+        TOP_SAMPLE_DELAY="$BURST_RESULT_INTERVAL"
     else
         if [[ "$DISPLAY_POWER_STATE" == "off" ]]; then
             if (( SCREEN_OFF_SINCE_MS == 0 )); then
@@ -836,21 +784,17 @@ while true; do
 
     CURRENT_BURST_SOURCE=""
     if (( TOP_SAMPLE_DELAY != DEFAULT_TOP_SAMPLE_DELAY )); then
-        if [[ -n "$ACTIVE_BURST_INTERVAL_OVERRIDE" ]]; then
-            CURRENT_BURST_SOURCE="override"
-        elif (( USR1_BURST_ACTIVE == 1 )); then
-            CURRENT_BURST_SOURCE="usr1"
-        elif (( ACTIVE_BURST_LEVEL >= 2 && ACTIVE_BURST_LEVEL <= 5 )); then
-            CURRENT_BURST_SOURCE="level"
+        if [[ -n "$BURST_RESULT_INTERVAL" ]]; then
+            CURRENT_BURST_SOURCE="profile"
         fi
     fi
 
-    if [[ "$CURRENT_BURST_SOURCE" == "level" ]]; then
-        if [[ "$LAST_BURST_SOURCE" != "level" || "$TOP_SAMPLE_DELAY" != "$LAST_BURST_DELAY" ]]; then
-            enqueue_event_marker "${BURST_EVENT_CODE}${ACTIVE_BURST_LEVEL}"
+    if [[ "$CURRENT_BURST_SOURCE" == "profile" ]]; then
+        if [[ "$LAST_BURST_SOURCE" != "profile" || "$TOP_SAMPLE_DELAY" != "$LAST_BURST_DELAY" ]]; then
+            enqueue_event_marker "${BURST_EVENT_CODE}${EFFECTIVE_FAN_LEVEL}"
         fi
         LAST_BURST_DELAY="$TOP_SAMPLE_DELAY"
-    elif [[ "$LAST_BURST_SOURCE" == "level" ]]; then
+    elif [[ "$LAST_BURST_SOURCE" == "profile" ]]; then
         enqueue_event_marker "${BURST_EVENT_CODE}E"
         LAST_BURST_DELAY=""
     fi
@@ -882,11 +826,6 @@ while true; do
         if [[ "$RESUME_DISPLAY_STATE" != "off" ]]; then
             RESUME_TIME_MS=$(date +%s%3N)
             start_burst_profile "$RESUME_TIME_MS"
-
-            if (( BURST_RESULT_UNTIL_MS > ACTIVE_BURST_UNTIL_MS )); then
-                ACTIVE_BURST_UNTIL_MS=$BURST_RESULT_UNTIL_MS
-            fi
-            ACTIVE_BURST_INTERVAL_OVERRIDE="$BURST_PHASE1_INTERVAL"
         fi
     fi
     MINIMUM_SAMPLE_ELAPSED_MS=$((TOP_SAMPLE_DELAY * 1000 - 1000))
