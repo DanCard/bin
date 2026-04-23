@@ -45,7 +45,17 @@ if [[ "$1" =~ ^[0-9]+$ ]]; then
     else
         DPMS_SLEEP_TIME="$SLEEP_TIME"
         DPMS_OFF_TIME=$((DPMS_SLEEP_TIME + 1))
-        SUSPEND_TIME=$((SLEEP_TIME * 2))
+        if [ "$SLEEP_TIME" -gt 5 ]; then
+			SUSPEND_TIME=$((DPMS_SLEEP_TIME * DPMS_OFF_TIME))
+		elif [ "$SLEEP_TIME" -lt 5]; then
+			if [ "$SLEEP_TIME" -lt 3]; then
+	        	SUSPEND_TIME=$((SLEEP_TIME + 1))
+	        else
+	        	SUSPEND_TIME=$((SLEEP_TIME * 2))
+	        fi
+	    else
+	    	SUSPEND_TIME=20
+	    fi
     fi
 
     # Override suspend time if second argument is provided
