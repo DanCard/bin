@@ -7,7 +7,7 @@ print_help() {
     echo "Example: $0 10"
     echo "  Sets DPMS sleep to 10 minutes"
     echo "  Sets DPMS off to 11 minutes (sleep + 1)"
-    echo "  Sets system suspend to 110 minutes (sleep x off)"
+    echo "  Sets system suspend to 20 minutes (sleep x 2)"
     echo ""
     echo "Example: $0 10 60"
     echo "  Sets DPMS sleep to 10 minutes"
@@ -45,7 +45,7 @@ if [[ "$1" =~ ^[0-9]+$ ]]; then
     else
         DPMS_SLEEP_TIME="$SLEEP_TIME"
         DPMS_OFF_TIME=$((DPMS_SLEEP_TIME + 1))
-        SUSPEND_TIME=$((DPMS_SLEEP_TIME * DPMS_OFF_TIME))
+        SUSPEND_TIME=$((SLEEP_TIME * 2))
     fi
 
     # Override suspend time if second argument is provided
