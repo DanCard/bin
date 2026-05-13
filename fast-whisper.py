@@ -133,9 +133,12 @@ def format_time(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
 
 
-def preprocess_audio(input_path, output_dir="."):
+def preprocess_audio(input_path, output_dir=".", resume=False):
     base_name = os.path.basename(input_path)
     output_wav = os.path.join(output_dir, f"{base_name}.{FILE_TAG}.tmp.wav")
+    if resume and os.path.exists(output_wav):
+        logging.info(f"Resuming: found existing WAV at {output_wav}")
+        return output_wav
     logging.info(f"Preprocessing audio to 16kHz mono WAV: {output_wav}")
 
     cmd = [
@@ -291,6 +294,7 @@ def main():
     parser.add_argument("--verbose-decode", action="store_true", help="Enable verbose Whisper decoding output")
     parser.add_argument("--output-dir", help="Directory to save outputs and cache files", default=".")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size for diarization phases")
+    parser.add_argument("--resume", action="store_true", help="Resume from existing temporary/cache files")
     parser.add_argument(
         "--device",
         choices=["auto", "cuda", "cpu"],
@@ -322,13 +326,18 @@ def main():
     setup_logging(audio_file, output_dir)
     hf_token = check_env()
     print_startup_overview(audio_file, output_dir, args, device, fp16)
+    output_txt, output_json = get_output_paths(audio_file, output_dir)
+    if args.resume and os.path.exists(output_txt) and os.path.exists(output_json):
+        logging.info("Final output files already exist and --resume is set. Exiting.")
+        sys.exit(0)
+    
     logging.info(f"Using inference device: {device}")
 
     working_file = None
 
     try:
         # Preprocess
-        working_file = preprocess_audio(audio_file, output_dir)
+        working_file = preprocess_audio(audio_file, output_dir, resume=args.resume)
 
         start_total = time.time()
 

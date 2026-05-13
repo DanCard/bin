@@ -126,10 +126,12 @@ do_curve() {
     log "Temperature: $(cat "$SYSFS/temp1/temp")°C"
     log ""
 
-    # Config for all fans: off below 27°C, unified curve starting at 40°C
-    log "Configuring unified curve for all fans..."
-    set_all rampup_curve   "39,49,74,86,94"
-    set_all rampdown_curve "33,44,62,76,84"
+    # Aggressive Cooling / Gaming Profile:
+    # High performance profile with a tight 5°C hysteresis.
+    # Level 1 starts at 40°C. Level 5 (max) is reached at 80°C.
+    log "Configuring Aggressive Cooling curve for all fans..."
+    set_all rampup_curve   "40,50,60,70,80"
+    set_all rampdown_curve "35,45,55,65,75"
     set_all mode curve
 
     log ""
