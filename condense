@@ -18,17 +18,19 @@ DEFAULT_MAX_TOKENS = -1
 LOG_PATH = "llama-server.log"
 
 SYSTEM_PROMPT = (
-    "You are an expert transcription analyst. Produce a verbatim-adjacent, exhaustive report of the meeting. "
-    "Capture the full depth of technical discussions, side-bars, and nuanced context. Do not omit details for brevity. "
-    "Use markdown formatting with clear headers, bullet and numbered points, and tables for structured data."
+    "Produce an exhaustive report of the meeting. "
+    "Capture the full depth of technical discussions and side-bars. Do not omit details for brevity. "
+    "Use markdown formatting with clear headers, bullet or numbered points, and tables for structured data. "
+    "Include lots of quotes and excerpts inline within the topical sections"
+    # ; do not create a separate 'Notable Quotes' section at the end."
 )
 
 USER_PROMPT_PREFIX = (
     "Here is the full transcript of a meeting. Provide an incredibly detailed record covering every topic, "
-    "every decision, and every specific detail mentioned. Use inline quotes for significant statements. "
-    "Include a list of attendees and table of comprehensive Action Items."
+    "every decision, and every specific detail mentioned. Include a list of meeting attendees and comprehensive Action Items table. "
+    "Do not summarize or condense; expand on every point made."
+    # "Integrate nuance and quotes directly into the relevant discussion points rather than aggregating them at the bottom. "
 )
-#    "Do not summarize or condense; expand on every point made."
 
 def is_server_running(url):
     """Check if the server is responding to API requests."""
