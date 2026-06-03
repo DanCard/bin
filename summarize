@@ -27,8 +27,8 @@ USER_PROMPT_PREFIX = (
     "Here is the full transcript of a meeting. Provide an incredibly detailed record covering every topic, "
     "every decision, and every specific detail mentioned. Use inline quotes for significant statements. "
     "Include a list of attendees and table of comprehensive Action Items."
+    "Do not summarize or condense"
 )
-#    "Do not summarize or condense; expand on every point made."
 
 def is_server_running(url):
     """Check if the server is responding to API requests."""

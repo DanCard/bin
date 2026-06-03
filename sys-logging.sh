@@ -37,6 +37,7 @@ DEFAULT_TOP_SAMPLE_DELAY=29
 SCREEN_OFF_SAMPLE_DELAY=60
 SCREEN_OFF_THRESHOLD_MS=$((60*1000))
 EMULATOR_KILL_THRESHOLD_MS=$((25*60*1000))
+FIREFOX_CPU_KILL_THRESHOLD=50
 LOOP_SAFETY_SLEEP=0.1
 SCREEN_DEBUG=0
 START_EVENT_CODE="▷"
@@ -45,6 +46,7 @@ USER_BURST_EVENT_CODE="🏃"
 BURST_EVENT_CODE="🌀"
 SCREEN_ON_EVENT_CODE="■"
 SCREEN_OFF_EVENT_CODE="□"
+FIREFOX_KILLED_EVENT_CODE="☠"
 TOP_PROCS_MIN_WIDTH=$((TOP_N * (7 + PROC_NAME_WIDTH) + (TOP_N - 1)))
 # Event markers are appended to the next telemetry line:
 # - ▷   service start
@@ -55,6 +57,7 @@ TOP_PROCS_MIN_WIDTH=$((TOP_N * (7 + PROC_NAME_WIDTH) + (TOP_N - 1)))
 # - 🌀E level-based burst complete
 # - ■   screen turned on
 # - □   screen turned off
+# - ☠   firefox killed (high CPU + screen off)
 RESUME_DETECT_THRESHOLD_MS=$((75*1000))
 MANUAL_BURST_LEVEL=2
 BURST_PHASE1_INTERVAL=8
@@ -808,6 +811,27 @@ while true; do
     # Re-check screen state after top completes to catch transitions during sampling.
     POST_TOP_DISPLAY_STATE=$(get_display_power_state)
     update_screen_state "$POST_TOP_DISPLAY_STATE" "post-top"
+
+    # Kill Firefox if it is consuming excessive CPU while the screen is off.
+    if [[ "$POST_TOP_DISPLAY_STATE" == "off" && "$DISPLAY_POWER_STATE" == "off" ]]; then
+        if echo "$TOP_PROCESSES" | awk -v thresh="$FIREFOX_CPU_KILL_THRESHOLD" '
+            {
+                for (i=1; i<=NF; i++) {
+                    if ($i ~ /%$/) {
+                        cpu = substr($i, 1, length($i)-1);
+                        proc = $(i+1);
+                        if (proc ~ /^firefox/ && cpu + 0 >= thresh + 0) {
+                            exit 0;
+                        }
+                    }
+                }
+                exit 1;
+            }'; then
+            if pkill firefox; then
+                enqueue_event_marker "${FIREFOX_KILLED_EVENT_CODE}FF"
+            fi
+        fi
+    fi
 
     if (( SAMPLE_ELAPSED_MILLISECONDS > RESUME_DETECT_THRESHOLD_MS )); then
         # Visually separate telemetry around suspend/resume boundaries.
