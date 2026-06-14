@@ -8,6 +8,7 @@ import subprocess
 import shutil
 import requests
 import psutil
+from tqdm import tqdm
 
 # Configuration
 LLAMA_SERVER_BIN = os.path.expanduser("~/github/llama.cpp/build/bin/llama-server")
@@ -122,8 +123,21 @@ def generate_summary(transcript_path, output_path, max_tokens, url, agent):
         ],
         "max_tokens": max_tokens,
         "temperature": 0,
-        "stream": True
+        "stream": True,
+        "return_progress": True,    # prompt_progress: {total, cache, processed, time_ms}
+        "timings_per_token": True   # timings: {predicted_n, predicted_per_second, ...}
     }
+
+    # Two-phase progress bars (render to stderr so stdout/tail -f stay clean).
+    # Phase 1: prompt ingestion (determinate % from prompt_progress).
+    # Phase 2: generation (token count + tok/s; determinate only if max_tokens > 0).
+    prompt_bar = None
+    gen_bar = None
+
+    def close_bars():
+        for bar in (prompt_bar, gen_bar):
+            if bar is not None:
+                bar.close()
 
     try:
         response = requests.post(
@@ -134,7 +148,6 @@ def generate_summary(transcript_path, output_path, max_tokens, url, agent):
         )
         response.raise_for_status()
 
-        char_count = 0
         with open(output_path, 'w') as f_out:
             for line in response.iter_lines():
                 if line:
@@ -145,23 +158,58 @@ def generate_summary(transcript_path, output_path, max_tokens, url, agent):
                             break
                         try:
                             data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+
+                        # Phase 1: prompt-processing progress
+                        progress = data.get("prompt_progress")
+                        if progress and gen_bar is None:
+                            total = progress.get("total", 0)
+                            processed = progress.get("processed", 0)
+                            if prompt_bar is None:
+                                prompt_bar = tqdm(
+                                    total=total or None,
+                                    desc="Prompt", unit="tok", unit_scale=True,
+                                    file=sys.stderr, leave=True
+                                )
+                            if total and prompt_bar.total != total:
+                                prompt_bar.total = total
+                            prompt_bar.update(max(0, processed - prompt_bar.n))
+
+                        # Content tokens => generation phase has begun
+                        try:
                             content = data['choices'][0]['delta'].get('content', '')
+                        except (KeyError, IndexError):
+                            content = ''
+                        timings = data.get("timings", {})
+
+                        if content or (timings and gen_bar is not None):
+                            if gen_bar is None:
+                                if prompt_bar is not None:
+                                    prompt_bar.close()
+                                gen_bar = tqdm(
+                                    total=(max_tokens if max_tokens and max_tokens > 0 else None),
+                                    desc="Generating", unit="tok", unit_scale=True,
+                                    file=sys.stderr, leave=True
+                                )
                             if content:
-                                # Write to file
                                 f_out.write(content)
                                 f_out.flush()
-                                
-                                # Update progress in console
-                                char_count += len(content)
-                                sys.stdout.write(f"\r⏳ Generating: {char_count} characters written...")
-                                sys.stdout.flush()
-                        except (json.JSONDecodeError, KeyError):
-                            continue
-        
+                            predicted_n = timings.get("predicted_n")
+                            if predicted_n is not None:
+                                gen_bar.update(max(0, predicted_n - gen_bar.n))
+                            elif content:
+                                gen_bar.update(1)
+                            tps = timings.get("predicted_per_second")
+                            if tps is not None:
+                                gen_bar.set_postfix_str(f"{tps:.1f} tok/s")
+
+        close_bars()
         print(f"\n✅ Detailed record saved to: {output_path}")
         create_google_doc(output_path, agent)
 
     except requests.exceptions.RequestException as e:
+        close_bars()
         print(f"\n❌ Error calling llama-server: {e}")
 
 
