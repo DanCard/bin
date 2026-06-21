@@ -267,29 +267,87 @@ def embed_clip(diar_pipe, wav_path):
         return None
     return e / n
 
+def _consistent_subset(embs, min_sim=0.45):
+    """Given unit-norm clip embeddings claimed to be one person, return the largest
+    mutually-consistent subset. Picks the medoid (max total similarity to the rest)
+    and keeps clips whose cosine to it is >= min_sim. This drops clips that slipped
+    in from a wrong SPEAKER label (mismatched numbering) without trusting any single
+    clip. With fewer than 3 clips there's nothing reliable to vote out, so keep all."""
+    if len(embs) < 3:
+        return embs
+    M = np.vstack(embs)
+    sims = M @ M.T
+    medoid = int(np.argmax(sims.sum(axis=1)))
+    kept = [e for i, e in enumerate(embs) if sims[medoid, i] >= min_sim]
+    return kept or [embs[medoid]]
+
+def _embed_one(diar_pipe, path, output_dir):
+    """Preprocess a single reference clip and return its dominant-speaker embedding."""
+    wav = preprocess_audio(path, output_dir)
+    try:
+        return embed_clip(diar_pipe, wav)
+    finally:
+        if os.path.exists(wav):
+            os.remove(wav)
+
 def load_enrollment(diar_pipe, speakers_dir, output_dir, rebuild=False):
     """Load (or build) cached voiceprints from a directory of reference clips.
-    Returns {name: unit-norm embedding}. Cache lives next to each clip as
-    <name>.npy."""
+    Returns {name: unit-norm embedding}. Cache lives as <name>.npy.
+
+    Two layouts are supported per person:
+      * a flat clip  <name>.<ext>            -> single-clip voiceprint
+      * a subdir     <name>/ (many clips)    -> mean of all clips' embeddings
+    The subdir form yields a more robust voiceprint across mics/conditions; if
+    both exist for a name, the subdir wins."""
     refs = {}
     if not os.path.isdir(speakers_dir):
         logging.error(f"--speakers dir not found: {speakers_dir}")
         return refs
-    for fn in sorted(os.listdir(speakers_dir)):
+
+    entries = sorted(os.listdir(speakers_dir))
+    subdir_names = {e for e in entries if os.path.isdir(os.path.join(speakers_dir, e))}
+
+    # Per-person subdirectories: average all clip embeddings.
+    for name in sorted(subdir_names):
+        npy = os.path.join(speakers_dir, name + ".npy")
+        if not rebuild and os.path.exists(npy):
+            refs[name] = np.load(npy)
+            continue
+        d = os.path.join(speakers_dir, name)
+        clips = [os.path.join(d, f) for f in sorted(os.listdir(d))
+                 if os.path.splitext(f)[1].lower() in AUDIO_EXTS]
+        embs = []
+        for c in clips:
+            e = _embed_one(diar_pipe, c, output_dir)
+            if e is not None:
+                embs.append(e)
+        if not embs:
+            logging.warning(f"Enrollment: no usable clips for '{name}', skipping")
+            continue
+        kept = _consistent_subset(embs)
+        dropped = len(embs) - len(kept)
+        m = np.mean(np.vstack(kept), axis=0)
+        n = np.linalg.norm(m)
+        if n < 1e-6:
+            logging.warning(f"Enrollment: degenerate mean for '{name}', skipping")
+            continue
+        m = m / n
+        np.save(npy, m)
+        refs[name] = m
+        logging.info(f"Enrolled '{name}' (mean of {len(kept)}/{len(clips)} clips"
+                     + (f", {dropped} outlier(s) dropped)" if dropped else ")"))
+
+    # Flat clips: single-clip voiceprints (skip names a subdir already covered).
+    for fn in entries:
         stem, ext = os.path.splitext(fn)
-        if ext.lower() not in AUDIO_EXTS:
+        if ext.lower() not in AUDIO_EXTS or stem in subdir_names:
             continue
         path = os.path.join(speakers_dir, fn)
         npy = os.path.join(speakers_dir, stem + ".npy")
         if not rebuild and os.path.exists(npy):
             refs[stem] = np.load(npy)
             continue
-        wav = preprocess_audio(path, output_dir)
-        try:
-            e = embed_clip(diar_pipe, wav)
-        finally:
-            if os.path.exists(wav):
-                os.remove(wav)
+        e = _embed_one(diar_pipe, path, output_dir)
         if e is None:
             logging.warning(f"Enrollment: no usable embedding for {fn}, skipping")
             continue
