@@ -1,6 +1,7 @@
-#!/usr/bin/python3
+#!/home/dcar/.venvs/transcribe/bin/python
 import os
 import sys
+import warnings
 
 # ROCm 7.2.4 + Strix Halo (gfx1151) Optimization
 os.environ["HSA_OVERRIDE_GFX_VERSION"] = "11.5.1"
@@ -15,6 +16,13 @@ import subprocess
 import numpy as np
 import soundfile as sf
 from tqdm import tqdm
+
+# pyannote's audio backend probes FFmpeg 4-8 looking for torchcodec and, when the
+# bundled torchcodec can't load, emits one UserWarning whose body is six stacked
+# tracebacks (looks like a wall of errors). We decode audio ourselves (ffmpeg ->
+# 16 kHz WAV, fed as in-memory tensors / a WAV path), so torchcodec is never used.
+# Silence just that warning. (?s) so .* spans the message's leading newline.
+warnings.filterwarnings("ignore", message=r"(?s).*torchcodec is not installed")
 
 # IMPORT ORDER MATTERS: torch (and pyannote, which uses torch) must be imported
 # BEFORE faster_whisper/ctranslate2. The ctranslate2 ROCm wheel loads its own
@@ -406,10 +414,11 @@ def main():
     parser.add_argument("--min-turn", type=float, default=1.0,
                         help="Absorb speaker blocks shorter than this many seconds into a neighbor "
                              "(removes mis-split 1-word fragments). 0 disables.")
-    parser.add_argument("--boundary-snap", type=float, default=1.5,
+    parser.add_argument("--boundary-snap", type=float, default=0,
                         help="Snap each speaker-change boundary to the largest inter-word silence "
                              "within +/- this many seconds (fixes boundary words attributed to the "
-                             "wrong speaker, e.g. from VAD timestamp drift). 0 disables.")
+                             "wrong speaker, e.g. from VAD timestamp drift). Default off: tested "
+                             "net-neutral on this pipeline. Set e.g. 1.5 to enable.")
     parser.add_argument("--speakers", default="~/.config/transcribe/speakers",
                         help="Directory of known-speaker reference clips (one audio file per "
                              "person, named <Name>.<ext>). Matched speakers are labeled by name "
