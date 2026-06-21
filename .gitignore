@@ -7,6 +7,19 @@ mdcat
 opencode
 atop
 
+# Electron app builds and large binary directories
+Antigravity-x64/
+Antigravity/
+
+# Binary files
+*.so
+*.dll
+*.dylib
+*.exe
+*.bin
+*.pak
+*.dat
+
 # Python cache
 __pycache__/
 *.pyc
