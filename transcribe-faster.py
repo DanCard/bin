@@ -1,4 +1,4 @@
-#!/home/dcar/.venvs/transcribe/bin/python
+#!/usr/bin/python3
 import os
 import sys
 
@@ -73,7 +73,9 @@ def diarize_windowed(diar_pipe, working_file, window_s, distance_threshold):
     accuracy; clustering the per-window speaker embeddings keeps the same person
     under one global SPEAKER_xx label across windows.
 
-    Returns a sorted list of (start, end, "SPEAKER_xx") turns in file time.
+    Returns (turns, centroids):
+      - turns: sorted list of (start, end, "SPEAKER_xx") in file time.
+      - centroids: {"SPEAKER_xx": unit-norm mean embedding} for speaker enrollment.
     """
     info = sf.info(working_file)
     sr = info.samplerate
@@ -117,6 +119,7 @@ def diarize_windowed(diar_pipe, working_file, window_s, distance_threshold):
     keymap = {}
     valid = [i for i, e in enumerate(node_emb)
              if np.all(np.isfinite(e)) and np.linalg.norm(e) > 1e-6]
+    valid_set = set(valid)
     next_id = 0
     if len(valid) == 1:
         keymap[node_key[valid[0]]] = 0
@@ -148,7 +151,22 @@ def diarize_windowed(diar_pipe, working_file, window_s, distance_threshold):
         for (w, lab, s, e) in window_turns
     ]
     turns.sort()
-    return turns
+
+    # Per-global-speaker centroid (unit-norm mean of its member embeddings) so a
+    # speaker can be matched against enrolled reference voiceprints by cosine.
+    grouped = {}
+    for i, key in enumerate(node_key):
+        if i not in valid_set:
+            continue
+        v = node_emb[i] / np.linalg.norm(node_emb[i])
+        grouped.setdefault(keymap[key], []).append(v)
+    centroids = {}
+    for gid, vecs in grouped.items():
+        m = np.mean(np.vstack(vecs), axis=0)
+        n = np.linalg.norm(m)
+        if n > 1e-6:
+            centroids[f"SPEAKER_{gid:02d}"] = m / n
+    return turns, centroids
 
 def transcribe_words(model, working_file, args):
     """Run faster-whisper with native (GPU, ctranslate2) word timestamps and
@@ -188,9 +206,125 @@ def transcribe_words(model, working_file, args):
     bar.close()
     return words
 
+def snap_boundaries(turns, words, window, min_gap=0.15):
+    """Move each speaker-change boundary to the largest inter-word silence within
+    +/- `window` seconds of it. Speaker changes happen at pauses, and word
+    timestamps are exact, so this corrects boundary words attributed to the wrong
+    speaker (e.g. from VAD remap drift between the whisper and pyannote timelines)
+    even when the drift spans several words. Pure post-processing on existing
+    arrays -- no effect on transcription speed."""
+    if window <= 0 or len(turns) < 2 or len(words) < 2:
+        return turns
+    gaps = []
+    for i in range(len(words) - 1):
+        cur_end, nxt_start = words[i][2], words[i + 1][1]
+        g = nxt_start - cur_end
+        if g > min_gap:
+            gaps.append(((cur_end + nxt_start) / 2.0, g))
+    if not gaps:
+        return turns
+    t = [list(x) for x in turns]
+    for i in range(len(t) - 1):
+        if t[i][2] == t[i + 1][2]:
+            continue
+        b = (t[i][1] + t[i + 1][0]) / 2.0
+        lo = max(b - window, t[i][0] + 1e-3)
+        hi = min(b + window, t[i + 1][1] - 1e-3)
+        best, best_g = None, 0.0
+        for c, g in gaps:
+            if lo <= c <= hi and g > best_g:
+                best, best_g = c, g
+        if best is not None:
+            t[i][1] = best
+            t[i + 1][0] = best
+    return [tuple(x) for x in t]
+
+AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".oga", ".aac", ".mp4", ".webm", ".opus"}
+
+def embed_clip(diar_pipe, wav_path):
+    """Run pyannote on a (16 kHz mono) clip and return the unit-norm embedding of
+    its dominant speaker, in the same space as diarize_windowed's embeddings."""
+    wav, sr = sf.read(wav_path, dtype="float32", always_2d=True)
+    if wav.shape[0] == 0:
+        return None
+    out = diar_pipe({"waveform": torch.from_numpy(wav.T).contiguous(), "sample_rate": sr})
+    emb = out.speaker_embeddings
+    if emb is None:
+        return None
+    labels = out.speaker_diarization.labels()
+    durations = {}
+    for seg, _, lab in out.speaker_diarization.itertracks(yield_label=True):
+        durations[lab] = durations.get(lab, 0.0) + (seg.end - seg.start)
+    if not durations:
+        return None
+    dom = max(durations, key=durations.get)
+    idx = labels.index(dom)
+    if idx >= len(emb):
+        return None
+    e = emb[idx]
+    n = np.linalg.norm(e)
+    if not np.all(np.isfinite(e)) or n < 1e-6:
+        return None
+    return e / n
+
+def load_enrollment(diar_pipe, speakers_dir, output_dir, rebuild=False):
+    """Load (or build) cached voiceprints from a directory of reference clips.
+    Returns {name: unit-norm embedding}. Cache lives next to each clip as
+    <name>.npy."""
+    refs = {}
+    if not os.path.isdir(speakers_dir):
+        logging.error(f"--speakers dir not found: {speakers_dir}")
+        return refs
+    for fn in sorted(os.listdir(speakers_dir)):
+        stem, ext = os.path.splitext(fn)
+        if ext.lower() not in AUDIO_EXTS:
+            continue
+        path = os.path.join(speakers_dir, fn)
+        npy = os.path.join(speakers_dir, stem + ".npy")
+        if not rebuild and os.path.exists(npy):
+            refs[stem] = np.load(npy)
+            continue
+        wav = preprocess_audio(path, output_dir)
+        try:
+            e = embed_clip(diar_pipe, wav)
+        finally:
+            if os.path.exists(wav):
+                os.remove(wav)
+        if e is None:
+            logging.warning(f"Enrollment: no usable embedding for {fn}, skipping")
+            continue
+        np.save(npy, e)
+        refs[stem] = e
+        logging.info(f"Enrolled '{stem}'")
+    return refs
+
+def match_speakers(centroids, refs, threshold):
+    """Greedy one-to-one cosine matching of diarized speakers to enrolled names.
+    Returns {SPEAKER_xx: name} for matches at or above `threshold`."""
+    if not refs or not centroids:
+        return {}
+    sims = []
+    for spk, c in centroids.items():
+        for name, r in refs.items():
+            sims.append((float(np.dot(c, r)), spk, name))
+    sims.sort(reverse=True)
+    mapping, used_spk, used_name = {}, set(), set()
+    for sim, spk, name in sims:
+        if sim < threshold:
+            break
+        if spk in used_spk or name in used_name:
+            continue
+        mapping[spk] = name
+        used_spk.add(spk)
+        used_name.add(name)
+        logging.info(f"Matched {spk} -> '{name}' (cosine {sim:.3f})")
+    return mapping
+
 def main():
     parser = argparse.ArgumentParser(description="Strix Halo faster-whisper transcription + diarization")
-    parser.add_argument("audio_file", help="Path to audio file")
+    parser.add_argument("audio_file", nargs="?",
+                        help="Path to audio file (optional when only (re)building "
+                             "voiceprints with --enroll)")
     parser.add_argument("--model", default="large-v3",
                         help="faster-whisper model (e.g. large-v3, large-v3-turbo)")
     parser.add_argument("--compute-type", default="float16", help="ctranslate2 compute type")
@@ -214,9 +348,32 @@ def main():
     parser.add_argument("--min-turn", type=float, default=1.0,
                         help="Absorb speaker blocks shorter than this many seconds into a neighbor "
                              "(removes mis-split 1-word fragments). 0 disables.")
+    parser.add_argument("--boundary-snap", type=float, default=1.5,
+                        help="Snap each speaker-change boundary to the largest inter-word silence "
+                             "within +/- this many seconds (fixes boundary words attributed to the "
+                             "wrong speaker, e.g. from VAD timestamp drift). 0 disables.")
+    parser.add_argument("--speakers", default="~/.config/transcribe/speakers",
+                        help="Directory of known-speaker reference clips (one audio file per "
+                             "person, named <Name>.<ext>). Matched speakers are labeled by name "
+                             "instead of SPEAKER_xx; embeddings are cached as <Name>.npy. Defaults "
+                             "to ~/.config/transcribe/speakers (used automatically if it exists).")
+    parser.add_argument("--enroll", action="store_true",
+                        help="(Re)build the cached voiceprint for every clip in --speakers. With no "
+                             "audio_file, just builds the cache and exits.")
+    parser.add_argument("--enroll-threshold", type=float, default=0.5,
+                        help="Minimum cosine similarity to label a diarized speaker with an enrolled "
+                             "name (higher = stricter; unmatched speakers stay SPEAKER_xx).")
+    parser.add_argument("--diar-only", action="store_true",
+                        help="Skip transcription; run only diarization and print a per-speaker "
+                             "talk-time summary. For quickly sweeping --speaker-threshold / "
+                             "--diar-window without paying for transcription.")
     args = parser.parse_args()
 
-    audio_file = os.path.abspath(args.audio_file)
+    enroll_only = args.enroll and not args.audio_file
+    if not args.audio_file and not args.enroll:
+        print("Error: audio_file is required (or use --enroll to only build voiceprints).")
+        sys.exit(1)
+
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -225,14 +382,17 @@ def main():
         print("Error: HF_TOKEN environment variable required.")
         sys.exit(1)
 
-    setup_logging(audio_file, output_dir)
+    setup_logging(args.audio_file or "enroll", output_dir)
     if not torch.cuda.is_available():
         logging.error("torch.cuda is not available — pyannote diarization needs the GPU.")
         sys.exit(1)
     device = "cuda:0"
 
-    logging.info(f"Loading faster-whisper {args.model} (ctranslate2 ROCm, {args.compute_type})...")
-    model = WhisperModel(args.model, device="cuda", compute_type=args.compute_type)
+    # faster-whisper is only needed when we actually transcribe.
+    model = None
+    if not enroll_only and not args.diar_only:
+        logging.info(f"Loading faster-whisper {args.model} (ctranslate2 ROCm, {args.compute_type})...")
+        model = WhisperModel(args.model, device="cuda", compute_type=args.compute_type)
 
     logging.info("Loading Pyannote Diarization...")
     diarization_pipe = DiarizationPipeline.from_pretrained(
@@ -240,18 +400,34 @@ def main():
         token=hf_token
     ).to(torch.device(device))
 
+    # Known-speaker voiceprints (load cache, or rebuild with --enroll).
+    refs = {}
+    speakers_dir = os.path.abspath(os.path.expanduser(args.speakers)) if args.speakers else None
+    if speakers_dir and os.path.isdir(speakers_dir):
+        refs = load_enrollment(diarization_pipe, speakers_dir, output_dir, rebuild=args.enroll)
+        logging.info(f"Loaded {len(refs)} enrolled speaker(s): {', '.join(sorted(refs)) or '(none)'}")
+    elif args.enroll:
+        logging.error(f"--enroll requested but speakers dir not found: {speakers_dir}")
+        sys.exit(1)
+    if enroll_only:
+        logging.info("Enrollment complete (no audio_file given).")
+        return
+
+    audio_file = os.path.abspath(args.audio_file)
     working_file = preprocess_audio(audio_file, output_dir)
     start_time = time.time()
 
     try:
         # 1. Transcription — faster-whisper with native GPU word timestamps.
-        logging.info("Starting transcription (this is the long step)...")
-        words = transcribe_words(model, working_file, args)
-        logging.info(f"Transcription: {len(words)} words")
+        words = []
+        if not args.diar_only:
+            logging.info("Starting transcription (this is the long step)...")
+            words = transcribe_words(model, working_file, args)
+            logging.info(f"Transcription: {len(words)} words")
 
         # 2. Diarization — windowed, embeddings reconciled across windows.
         logging.info(f"Starting windowed diarization ({args.diar_window:g}-min windows)...")
-        turns = diarize_windowed(
+        turns, centroids = diarize_windowed(
             diarization_pipe, working_file,
             window_s=args.diar_window * 60,
             distance_threshold=args.speaker_threshold,
@@ -259,22 +435,50 @@ def main():
         n_spk = len({spk for _, _, spk in turns})
         logging.info(f"Diarization: {n_spk} speakers across {len(turns)} turns")
 
-        # 3. Merge — assign each word to the diarization turn it overlaps most
-        # (nearest turn if it falls in a gap), then group consecutive
-        # same-speaker words into blocks. Real per-word times mean speaker
-        # boundaries land between the right words and block times match audio.
+        # 2b. Speaker enrollment — rename matched SPEAKER_xx to known names.
+        mapping = match_speakers(centroids, refs, args.enroll_threshold)
+        if mapping:
+            turns = [(s, e, mapping.get(spk, spk)) for s, e, spk in turns]
+
+        # --diar-only: print a per-speaker talk-time summary and stop (for tuning
+        # --speaker-threshold / --diar-window without paying for transcription).
+        if args.diar_only:
+            totals = {}
+            for s, e, spk in turns:
+                totals[spk] = totals.get(spk, 0.0) + (e - s)
+            logging.info("Per-speaker talk time:")
+            for spk in sorted(totals, key=totals.get, reverse=True):
+                logging.info(f"  {spk}: {format_time(totals[spk])} "
+                             f"({totals[spk]:.1f}s) across "
+                             f"{sum(1 for _, _, s in turns if s == spk)} turns")
+            return
+
+        # 2c. Boundary snapping — move speaker changes to the nearest real pause
+        # so boundary words land on the right speaker (corrects timeline drift).
+        if args.boundary_snap > 0:
+            turns = snap_boundaries(turns, words, args.boundary_snap)
+
+        # 3. Merge — assign each word to the speaker active at its midpoint
+        # (more stable at edges than total overlap; nearest turn if it falls in a
+        # gap), then group consecutive same-speaker words into blocks.
         logging.info("Merging results...")
 
         def word_speaker(ws, we):
+            mid = (ws + we) / 2.0
+            mid_spk = None
             best, best_ov = None, 0.0
             nearest, nearest_gap = None, None
             for s, e, spk in turns:
+                if s <= mid < e:
+                    mid_spk = spk
                 ov = min(we, e) - max(ws, s)
                 if ov > best_ov:
                     best, best_ov = spk, ov
                 gap = max(s - we, ws - e, 0.0)  # 0 if overlapping
                 if nearest_gap is None or gap < nearest_gap:
                     nearest, nearest_gap = spk, gap
+            if mid_spk is not None:
+                return mid_spk
             return best if best is not None else nearest
 
         final_output = []
