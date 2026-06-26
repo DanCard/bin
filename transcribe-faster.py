@@ -427,9 +427,10 @@ def main():
     parser.add_argument("--enroll", action="store_true",
                         help="(Re)build the cached voiceprint for every clip in --speakers. With no "
                              "audio_file, just builds the cache and exits.")
-    parser.add_argument("--enroll-threshold", type=float, default=0.5,
+    parser.add_argument("--enroll-threshold", type=float, default=0.55,
                         help="Minimum cosine similarity to label a diarized speaker with an enrolled "
-                             "name (higher = stricter; unmatched speakers stay SPEAKER_xx).")
+                             "name (higher = stricter; unmatched speakers stay SPEAKER_xx). 0.5 let a "
+                             "borderline false positive through, so default is 0.55.")
     parser.add_argument("--diar-only", action="store_true",
                         help="Skip transcription; run only diarization and print a per-speaker "
                              "talk-time summary. For quickly sweeping --speaker-threshold / "
