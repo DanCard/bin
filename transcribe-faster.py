@@ -191,14 +191,26 @@ def transcribe_words(model, working_file, args):
     # otherwise renders this casual speech all-lowercase, unpunctuated). Repeat
     # loops are caught by faster-whisper's temperature fallback +
     # compression_ratio_threshold defaults.
+    # Map our --language convention onto faster-whisper's params:
+    #   "multi" -> detect per segment (multilingual=True), for code-switching
+    #   <code>  -> force that language for the whole file
+    lang = args.language
+    multilingual = lang == "multi"
+    if multilingual:
+        lang = None
     segments, tinfo = model.transcribe(
         working_file,
+        language=lang,
+        multilingual=multilingual,
         word_timestamps=True,
         vad_filter=args.vad,
         beam_size=args.beam_size,
         initial_prompt=args.initial_prompt,
     )
-    logging.info(f"Detected language: {tinfo.language} (p={tinfo.language_probability:.2f})")
+    if multilingual:
+        logging.info("Language: per-segment detection (multilingual)")
+    else:
+        logging.info(f"Language: {tinfo.language} (forced)")
 
     words = []
     last = 0.0
@@ -394,6 +406,12 @@ def main():
     parser.add_argument("--model", default="large-v3",
                         help="faster-whisper model (e.g. large-v3, large-v3-turbo)")
     parser.add_argument("--compute-type", default="float16", help="ctranslate2 compute type")
+    parser.add_argument("--language", default="en",
+                        help="Transcription language. Default: 'en' (English). Pass an ISO code "
+                             "(e.g. 'fr', 'uk') to force another language, or 'multi' to detect "
+                             "per segment (for code-switching calls, e.g. mixed English/Ukrainian).")
+    parser.add_argument("--multi", dest="language", action="store_const", const="multi",
+                        help="Shorthand for --language multi (per-segment language detection).")
     parser.add_argument("--beam-size", type=int, default=5, help="Whisper beam size")
     parser.add_argument("--initial-prompt",
                         default="Hello, everyone. Let's get started with the meeting.",
