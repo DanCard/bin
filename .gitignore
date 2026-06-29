@@ -33,3 +33,4 @@ __pycache__/
 
 old/
 .tmp/
+node_modules/

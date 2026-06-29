@@ -12,6 +12,7 @@ import math
 import argparse
 import json
 import logging
+import shutil
 import subprocess
 import numpy as np
 import soundfile as sf
@@ -310,6 +311,34 @@ def _embed_one(diar_pipe, path, output_dir):
         if os.path.exists(wav):
             os.remove(wav)
 
+def _enroll_subdir(diar_pipe, speakers_dir, name, output_dir):
+    """(Re)build and cache the voiceprint for a per-person subdir of clips.
+    Averages the consistent subset of all clip embeddings, saves <name>.npy, and
+    returns the unit-norm embedding (or None if no usable clips)."""
+    d = os.path.join(speakers_dir, name)
+    clips = [os.path.join(d, f) for f in sorted(os.listdir(d))
+             if os.path.splitext(f)[1].lower() in AUDIO_EXTS]
+    embs = []
+    for c in clips:
+        e = _embed_one(diar_pipe, c, output_dir)
+        if e is not None:
+            embs.append(e)
+    if not embs:
+        logging.warning(f"Enrollment: no usable clips for '{name}', skipping")
+        return None
+    kept = _consistent_subset(embs)
+    dropped = len(embs) - len(kept)
+    m = np.mean(np.vstack(kept), axis=0)
+    n = np.linalg.norm(m)
+    if n < 1e-6:
+        logging.warning(f"Enrollment: degenerate mean for '{name}', skipping")
+        return None
+    m = m / n
+    np.save(os.path.join(speakers_dir, name + ".npy"), m)
+    logging.info(f"Enrolled '{name}' (mean of {len(kept)}/{len(clips)} clips"
+                 + (f", {dropped} outlier(s) dropped)" if dropped else ")"))
+    return m
+
 def load_enrollment(diar_pipe, speakers_dir, output_dir, rebuild=False):
     """Load (or build) cached voiceprints from a directory of reference clips.
     Returns {name: unit-norm embedding}. Cache lives as <name>.npy.
@@ -333,29 +362,9 @@ def load_enrollment(diar_pipe, speakers_dir, output_dir, rebuild=False):
         if not rebuild and os.path.exists(npy):
             refs[name] = np.load(npy)
             continue
-        d = os.path.join(speakers_dir, name)
-        clips = [os.path.join(d, f) for f in sorted(os.listdir(d))
-                 if os.path.splitext(f)[1].lower() in AUDIO_EXTS]
-        embs = []
-        for c in clips:
-            e = _embed_one(diar_pipe, c, output_dir)
-            if e is not None:
-                embs.append(e)
-        if not embs:
-            logging.warning(f"Enrollment: no usable clips for '{name}', skipping")
-            continue
-        kept = _consistent_subset(embs)
-        dropped = len(embs) - len(kept)
-        m = np.mean(np.vstack(kept), axis=0)
-        n = np.linalg.norm(m)
-        if n < 1e-6:
-            logging.warning(f"Enrollment: degenerate mean for '{name}', skipping")
-            continue
-        m = m / n
-        np.save(npy, m)
-        refs[name] = m
-        logging.info(f"Enrolled '{name}' (mean of {len(kept)}/{len(clips)} clips"
-                     + (f", {dropped} outlier(s) dropped)" if dropped else ")"))
+        m = _enroll_subdir(diar_pipe, speakers_dir, name, output_dir)
+        if m is not None:
+            refs[name] = m
 
     # Flat clips: single-clip voiceprints (skip names a subdir already covered).
     for fn in entries:
@@ -378,25 +387,121 @@ def load_enrollment(diar_pipe, speakers_dir, output_dir, rebuild=False):
 
 def match_speakers(centroids, refs, threshold):
     """Greedy one-to-one cosine matching of diarized speakers to enrolled names.
-    Returns {SPEAKER_xx: name} for matches at or above `threshold`."""
+    Returns ({SPEAKER_xx: name}, {SPEAKER_xx: cosine}) for matches at or above
+    `threshold`; the scores let auto-enrollment harvest only confident matches."""
     if not refs or not centroids:
-        return {}
+        return {}, {}
     sims = []
     for spk, c in centroids.items():
         for name, r in refs.items():
             sims.append((float(np.dot(c, r)), spk, name))
     sims.sort(reverse=True)
-    mapping, used_spk, used_name = {}, set(), set()
+    mapping, scores, used_spk, used_name = {}, {}, set(), set()
     for sim, spk, name in sims:
         if sim < threshold:
             break
         if spk in used_spk or name in used_name:
             continue
         mapping[spk] = name
+        scores[spk] = sim
         used_spk.add(spk)
         used_name.add(name)
         logging.info(f"Matched {spk} -> '{name}' (cosine {sim:.3f})")
-    return mapping
+    return mapping, scores
+
+def _normalize_spk(s):
+    """Accept SPEAKER_10 / SP_10 / speaker10 / 10 and return canonical SPEAKER_10."""
+    digits = "".join(c for c in s if c.isdigit())
+    return f"SPEAKER_{int(digits):02d}" if digits else s.strip()
+
+def harvest_voiceprints(diar_pipe, turns, mapping, scores, audio_file,
+                        speakers_dir, output_dir, args):
+    """Auto-enrollment: grow known speakers' voiceprints from this meeting.
+
+    For each target speaker, cut their longest single-speaker diarization turns
+    (>= --harvest-min-seg) out of the source audio into <speakers>/<Name>/, then
+    rebuild that name's voiceprint so future meetings recognize them better.
+
+    Targets come from two sources:
+      * --label SPEAKER_xx=Name  -> always harvested (fix a miss / add someone new)
+      * --harvest                -> every speaker matched at cosine >= --harvest-min-cosine
+    The min-cosine gate (stricter than the match threshold) plus the consistent-
+    subset vote at rebuild time keep a borderline mislabel from poisoning a
+    voiceprint. Per-speaker clip count is capped by --harvest-max-clips."""
+    if not speakers_dir or not os.path.isdir(speakers_dir):
+        logging.warning("Harvest requested but --speakers dir is missing; skipping.")
+        return
+    spk_set = {spk for _, _, spk in turns}
+
+    plan = {}  # name -> SPEAKER_xx to harvest from
+    if args.label:
+        for pair in args.label.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            if "=" not in pair:
+                logging.warning(f"Harvest: bad --label '{pair}' (want SPEAKER_xx=Name)")
+                continue
+            spk, name = (p.strip() for p in pair.split("=", 1))
+            spk = _normalize_spk(spk)
+            if spk not in spk_set:
+                logging.warning(f"Harvest: --label speaker '{spk}' not in this meeting; skipping")
+                continue
+            plan[name] = spk
+    if args.harvest:
+        for spk, name in mapping.items():
+            if scores.get(spk, 0.0) >= args.harvest_min_cosine and name not in plan:
+                plan[name] = spk
+    if not plan:
+        logging.info("Harvest: no speakers to enroll.")
+        return
+
+    stem = os.path.splitext(os.path.basename(audio_file))[0]
+    affected = []
+    for name, spk in plan.items():
+        d = os.path.join(speakers_dir, name)
+        os.makedirs(d, exist_ok=True)
+        existing = [f for f in os.listdir(d)
+                    if os.path.splitext(f)[1].lower() in AUDIO_EXTS]
+        # If this name only had a flat <name>.<ext> clip so far, copy it into the
+        # subdir first so creating the subdir doesn't shadow (lose) that reference.
+        if not existing:
+            for ext in AUDIO_EXTS:
+                flat = os.path.join(speakers_dir, name + ext)
+                if os.path.exists(flat):
+                    shutil.copy2(flat, os.path.join(d, name + ext))
+                    existing.append(name + ext)
+                    break
+        room = args.harvest_max_clips - len(existing)
+        if room <= 0:
+            logging.info(f"Harvest: '{name}' at clip cap ({len(existing)}/"
+                         f"{args.harvest_max_clips}); skipping")
+            continue
+        segs = sorted(((e - s, s, e) for (s, e, sp) in turns
+                       if sp == spk and (e - s) >= args.harvest_min_seg),
+                      reverse=True)
+        if not segs:
+            logging.info(f"Harvest: no segment >= {args.harvest_min_seg:g}s for "
+                         f"{spk} ('{name}'); skipping")
+            continue
+        added = 0
+        for k in range(min(args.harvest_clips, room, len(segs))):
+            _, s, e = segs[k]
+            out = os.path.join(d, f"{stem}_{spk}_{k}.wav")
+            cmd = ["ffmpeg", "-y", "-ss", f"{s:.2f}", "-to", f"{e:.2f}",
+                   "-i", audio_file, "-ar", "16000", "-ac", "1", out]
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+                added += 1
+            except subprocess.CalledProcessError as ex:
+                logging.warning(f"Harvest: ffmpeg failed for {out}: "
+                                f"{ex.stderr.decode()[:200]}")
+        if added:
+            logging.info(f"Harvest: added {added} clip(s) for '{name}' from {spk}")
+            affected.append(name)
+
+    for name in affected:  # rebuild voiceprints (drops outliers via consistent subset)
+        _enroll_subdir(diar_pipe, speakers_dir, name, output_dir)
 
 def main():
     parser = argparse.ArgumentParser(description="Strix Halo faster-whisper transcription + diarization")
@@ -453,6 +558,28 @@ def main():
                         help="Skip transcription; run only diarization and print a per-speaker "
                              "talk-time summary. For quickly sweeping --speaker-threshold / "
                              "--diar-window without paying for transcription.")
+    parser.add_argument("--harvest", action="store_true",
+                        help="Auto-enrollment: after the run, append the longest, high-confidence "
+                             "single-speaker segments of MATCHED speakers from this meeting into "
+                             "their --speakers folders and rebuild their voiceprints, so "
+                             "recognition improves over time. Tune with --harvest-* below.")
+    parser.add_argument("--label", default=None,
+                        help="Comma-separated SPEAKER_xx=Name pairs to enroll from this meeting "
+                             "even if unmatched, e.g. 'SPEAKER_10=Andrew'. Harvests those "
+                             "speakers' best segments and rebuilds their voiceprints regardless of "
+                             "--harvest. Use to fix a missed speaker or add a new one.")
+    parser.add_argument("--harvest-min-cosine", type=float, default=0.80,
+                        help="Auto (--harvest) only enrolls speakers matched at or above this "
+                             "cosine (stricter than --enroll-threshold) to avoid poisoning "
+                             "voiceprints with a borderline mislabel. Default 0.80.")
+    parser.add_argument("--harvest-min-seg", type=float, default=8.0,
+                        help="Only harvest single-speaker segments at least this many seconds long "
+                             "(short clips make weak voiceprints). Default 8.")
+    parser.add_argument("--harvest-clips", type=int, default=2,
+                        help="Max NEW clips to add per speaker per run. Default 2.")
+    parser.add_argument("--harvest-max-clips", type=int, default=8,
+                        help="Cap on total clips kept per speaker folder; harvest stops adding once "
+                             "reached. Default 8.")
     args = parser.parse_args()
 
     enroll_only = args.enroll and not args.audio_file
@@ -522,7 +649,14 @@ def main():
         logging.info(f"Diarization: {n_spk} speakers across {len(turns)} turns")
 
         # 2b. Speaker enrollment — rename matched SPEAKER_xx to known names.
-        mapping = match_speakers(centroids, refs, args.enroll_threshold)
+        mapping, scores = match_speakers(centroids, refs, args.enroll_threshold)
+
+        # 2b-i. Auto-enrollment — grow voiceprints from this meeting (uses the
+        # still-SPEAKER_xx turns to locate each target speaker's segments).
+        if args.harvest or args.label:
+            harvest_voiceprints(diarization_pipe, turns, mapping, scores,
+                                audio_file, speakers_dir, output_dir, args)
+
         if mapping:
             turns = [(s, e, mapping.get(spk, spk)) for s, e, spk in turns]
 

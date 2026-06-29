@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@vegamo/deepcode-cli": "^0.1.33"
+  }
+}
