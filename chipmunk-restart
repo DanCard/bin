@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# checkmunk-restart — stop and relaunch the notification chipmunk-voice
+# chipmunk-restart — stop and relaunch the notification chipmunk-voice
 # daemon. Run this after editing the tuning knobs at the top of
 # ~/bin/notify-chipmunk (voice, speed, pitch).
 #
