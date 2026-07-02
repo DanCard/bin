@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""notify-chipmunk — speak the title of every desktop notification in a fast,
+high-pitched "chipmunk" voice, replacing the XFCE notification bell.
+
+It becomes a D-Bus monitor on the session bus (same mechanism dbus-monitor uses)
+and watches org.freedesktop.Notifications.Notify calls. For each one it speaks
+the notification title with espeak. Speech is serialized through a small queue
+so back-to-back notifications don't talk over each other.
+"""
+
+import os
+import queue
+import subprocess
+import threading
+
+import dbus
+from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import GLib
+
+# --- Tuning knobs -----------------------------------------------------------
+# Voice engine is Piper neural TTS (local ONNX model).
+# Available models in ~/.local/share/piper/voices:
+#   - en_US-lessac-high.onnx (High tier female, crisp dictionary reader)
+#   - en_US-amy-medium.onnx  (Medium tier female, soft natural voice)
+VOICES_DIR = os.path.expanduser("~/.local/share/piper/voices")
+PIPER_MODEL = os.path.join(VOICES_DIR, "en_US-lessac-high.onnx")
+LENGTH_SCALE = 0.9  # Phoneme length multiplier (<1.0 = slightly brisker speech)
+
+# Playback sample rate override: forces PulseAudio/PipeWire to play the 22.05 kHz
+# audio buffer at a higher rate, simultaneously raising pitch AND speeding up speech.
+#   22050 = 1.00x (Natural pitch & normal speed)
+#   26460 = 1.20x (Brisk speech, light pitch lift)
+#   28665 = 1.30x (Fast speech, soft chipmunk lift — recommended)
+#   32000 = 1.45x (Ultra-fast, full chipmunk lift)
+PLAYBACK_RATE = 35000
+
+def build_speak(text):
+    """Return an argv that speaks `text` using Piper neural TTS with sample rate pitch/speed lift."""
+    pipeline = (
+        f'echo "$1" | piper --model "{PIPER_MODEL}" --length_scale {LENGTH_SCALE} --output-raw | '
+        f'paplay --raw --rate={PLAYBACK_RATE} --format=s16le --channels=1'
+    )
+    return ["timeout", "12", "bash", "-c", pipeline, "_", text]
+
+MAX_CHARS = 200          # guard against runaway-long titles
+QUEUE_MAX = 5            # drop extras rather than backlog if flooded
+# To add a nature/chirp cue before the voice, uncomment and set a path:
+# CHIRP = ["paplay", "/home/dcar/.local/share/sounds/chirp.oga"]
+CHIRP = None
+# ---------------------------------------------------------------------------
+
+speech_q: "queue.Queue[str]" = queue.Queue(maxsize=QUEUE_MAX)
+
+
+def is_signal_call_active() -> bool:
+    """Return True if Signal is currently in an active call (ringrtc audio stream active)."""
+    try:
+        res = subprocess.run(
+            ["pactl", "list", "source-outputs"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1,
+        )
+        if "ringrtc" in res.stdout.lower():
+            return True
+
+        res_sink = subprocess.run(
+            ["pactl", "list", "sink-inputs"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1,
+        )
+        if "ringrtc" in res_sink.stdout.lower():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def worker() -> None:
+    while True:
+        text = speech_q.get()
+        try:
+            if is_signal_call_active():
+                continue
+            if CHIRP:
+                subprocess.call(CHIRP)
+            subprocess.call(build_speak(text))
+        except Exception:
+            pass
+        finally:
+            speech_q.task_done()
+
+
+def on_message(_bus, message) -> None:
+    if message.get_member() != "Notify":
+        return
+    args = message.get_args_list()
+    # Notify signature: app_name, replaces_id, app_icon, summary, body, ...
+    summary = str(args[3]) if len(args) > 3 else ""
+    if not summary.strip():
+        summary = str(args[0]) if args else ""   # fall back to app name
+    summary = summary.strip()[:MAX_CHARS]
+    if not summary:
+        return
+    try:
+        speech_q.put_nowait(summary)
+    except queue.Full:
+        pass
+
+
+def main() -> None:
+    threading.Thread(target=worker, daemon=True).start()
+
+    DBusGMainLoop(set_as_default=True)
+    bus = dbus.SessionBus()
+    bus.add_message_filter(on_message)
+    # BecomeMonitor: sanctioned, non-deprecated way to eavesdrop on Notify calls.
+    bus.call_blocking(
+        "org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus.Monitoring", "BecomeMonitor", "asu",
+        ([
+            "interface='org.freedesktop.Notifications',member='Notify'",
+        ], dbus.UInt32(0)),
+    )
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    main()

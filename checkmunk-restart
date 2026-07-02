@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# checkmunk-restart — stop and relaunch the notification chipmunk-voice
+# daemon. Run this after editing the tuning knobs at the top of
+# ~/bin/notify-chipmunk (voice, speed, pitch).
+#
+# The daemon also auto-starts at login via
+#   ~/.config/autostart/notify-chipmunk.desktop
+# so a logout/login restarts it too — this script is just for restarting it
+# by hand without logging out.
+#
+# What it does:
+#   1. pkill -f <daemon path>          -> stops the running daemon
+#   2. setsid <daemon path> ... &      -> starts a fresh one, detached so it
+#      keeps running after the terminal is closed.
+#   3. notify-send ...                 -> fires a test notification so you can
+#      immediately hear the current voice settings.
+#
+# Note: it matches on the daemon's full ~/bin path (not the bare word
+# "notify-chipmunk") so this restart script never kills itself.
+#
+# Test a notification any time with:
+#   notify-send "Testing one two three"
+
+set -u
+
+DAEMON="$HOME/bin/notify-chipmunk"
+
+pkill -f "$DAEMON$" 2>/dev/null
+sleep 1
+setsid "$DAEMON" >/dev/null 2>&1 < /dev/null &
+sleep 1
+
+if pgrep -f "$DAEMON$" >/dev/null; then
+    echo "notify-chipmunk restarted."
+    # Fire a test notification so you can hear the current voice settings.
+    notify-send "Chipmunk voice restarted"
+else
+    echo "notify-chipmunk failed to start — run '$DAEMON' directly to see errors." >&2
+    exit 1
+fi
