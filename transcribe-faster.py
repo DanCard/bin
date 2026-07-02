@@ -14,9 +14,34 @@ import json
 import logging
 import shutil
 import subprocess
+from contextlib import contextmanager
 import numpy as np
 import soundfile as sf
 from tqdm import tqdm
+
+@contextmanager
+def prevent_sleep(reason="Transcribing audio"):
+    """Prevent system sleep/idle-suspend while transcription is running using systemd-inhibit."""
+    proc = None
+    try:
+        proc = subprocess.Popen([
+            "systemd-inhibit",
+            "--what=idle:sleep",
+            "--who=transcribe",
+            "--why=" + reason,
+            "sleep", "infinity"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        logging.warning(f"Could not acquire sleep inhibitor lock: {e}")
+    try:
+        yield
+    finally:
+        if proc:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                proc.kill()
 
 # pyannote's audio backend probes FFmpeg 4-8 looking for torchcodec and, when the
 # bundled torchcodec can't load, emits one UserWarning whose body is six stacked
@@ -631,124 +656,125 @@ def main():
     start_time = time.time()
 
     try:
-        # 1. Transcription — faster-whisper with native GPU word timestamps.
-        words = []
-        if not args.diar_only:
-            logging.info("Starting transcription (this is the long step)...")
-            words = transcribe_words(model, working_file, args)
-            logging.info(f"Transcription: {len(words)} words")
+        with prevent_sleep(f"Transcribing {os.path.basename(audio_file)}"):
+            # 1. Transcription — faster-whisper with native GPU word timestamps.
+            words = []
+            if not args.diar_only:
+                logging.info("Starting transcription (this is the long step)...")
+                words = transcribe_words(model, working_file, args)
+                logging.info(f"Transcription: {len(words)} words")
 
-        # 2. Diarization — windowed, embeddings reconciled across windows.
-        logging.info(f"Starting windowed diarization ({args.diar_window:g}-min windows)...")
-        turns, centroids = diarize_windowed(
-            diarization_pipe, working_file,
-            window_s=args.diar_window * 60,
-            distance_threshold=args.speaker_threshold,
-        )
-        n_spk = len({spk for _, _, spk in turns})
-        logging.info(f"Diarization: {n_spk} speakers across {len(turns)} turns")
+            # 2. Diarization — windowed, embeddings reconciled across windows.
+            logging.info(f"Starting windowed diarization ({args.diar_window:g}-min windows)...")
+            turns, centroids = diarize_windowed(
+                diarization_pipe, working_file,
+                window_s=args.diar_window * 60,
+                distance_threshold=args.speaker_threshold,
+            )
+            n_spk = len({spk for _, _, spk in turns})
+            logging.info(f"Diarization: {n_spk} speakers across {len(turns)} turns")
 
-        # 2b. Speaker enrollment — rename matched SPEAKER_xx to known names.
-        mapping, scores = match_speakers(centroids, refs, args.enroll_threshold)
+            # 2b. Speaker enrollment — rename matched SPEAKER_xx to known names.
+            mapping, scores = match_speakers(centroids, refs, args.enroll_threshold)
 
-        # 2b-i. Auto-enrollment — grow voiceprints from this meeting (uses the
-        # still-SPEAKER_xx turns to locate each target speaker's segments).
-        if args.harvest or args.label:
-            harvest_voiceprints(diarization_pipe, turns, mapping, scores,
-                                audio_file, speakers_dir, output_dir, args)
+            # 2b-i. Auto-enrollment — grow voiceprints from this meeting (uses the
+            # still-SPEAKER_xx turns to locate each target speaker's segments).
+            if args.harvest or args.label:
+                harvest_voiceprints(diarization_pipe, turns, mapping, scores,
+                                    audio_file, speakers_dir, output_dir, args)
 
-        if mapping:
-            turns = [(s, e, mapping.get(spk, spk)) for s, e, spk in turns]
+            if mapping:
+                turns = [(s, e, mapping.get(spk, spk)) for s, e, spk in turns]
 
-        # --diar-only: print a per-speaker talk-time summary and stop (for tuning
-        # --speaker-threshold / --diar-window without paying for transcription).
-        if args.diar_only:
-            totals = {}
-            for s, e, spk in turns:
-                totals[spk] = totals.get(spk, 0.0) + (e - s)
-            logging.info("Per-speaker talk time:")
-            for spk in sorted(totals, key=totals.get, reverse=True):
-                logging.info(f"  {spk}: {format_time(totals[spk])} "
-                             f"({totals[spk]:.1f}s) across "
-                             f"{sum(1 for _, _, s in turns if s == spk)} turns")
-            return
+            # --diar-only: print a per-speaker talk-time summary and stop (for tuning
+            # --speaker-threshold / --diar-window without paying for transcription).
+            if args.diar_only:
+                totals = {}
+                for s, e, spk in turns:
+                    totals[spk] = totals.get(spk, 0.0) + (e - s)
+                logging.info("Per-speaker talk time:")
+                for spk in sorted(totals, key=totals.get, reverse=True):
+                    logging.info(f"  {spk}: {format_time(totals[spk])} "
+                                 f"({totals[spk]:.1f}s) across "
+                                 f"{sum(1 for _, _, s in turns if s == spk)} turns")
+                return
 
-        # 2c. Boundary snapping — move speaker changes to the nearest real pause
-        # so boundary words land on the right speaker (corrects timeline drift).
-        if args.boundary_snap > 0:
-            turns = snap_boundaries(turns, words, args.boundary_snap)
+            # 2c. Boundary snapping — move speaker changes to the nearest real pause
+            # so boundary words land on the right speaker (corrects timeline drift).
+            if args.boundary_snap > 0:
+                turns = snap_boundaries(turns, words, args.boundary_snap)
 
-        # 3. Merge — assign each word to the speaker active at its midpoint
-        # (more stable at edges than total overlap; nearest turn if it falls in a
-        # gap), then group consecutive same-speaker words into blocks.
-        logging.info("Merging results...")
+            # 3. Merge — assign each word to the speaker active at its midpoint
+            # (more stable at edges than total overlap; nearest turn if it falls in a
+            # gap), then group consecutive same-speaker words into blocks.
+            logging.info("Merging results...")
 
-        def word_speaker(ws, we):
-            mid = (ws + we) / 2.0
-            mid_spk = None
-            best, best_ov = None, 0.0
-            nearest, nearest_gap = None, None
-            for s, e, spk in turns:
-                if s <= mid < e:
-                    mid_spk = spk
-                ov = min(we, e) - max(ws, s)
-                if ov > best_ov:
-                    best, best_ov = spk, ov
-                gap = max(s - we, ws - e, 0.0)  # 0 if overlapping
-                if nearest_gap is None or gap < nearest_gap:
-                    nearest, nearest_gap = spk, gap
-            if mid_spk is not None:
-                return mid_spk
-            return best if best is not None else nearest
+            def word_speaker(ws, we):
+                mid = (ws + we) / 2.0
+                mid_spk = None
+                best, best_ov = None, 0.0
+                nearest, nearest_gap = None, None
+                for s, e, spk in turns:
+                    if s <= mid < e:
+                        mid_spk = spk
+                    ov = min(we, e) - max(ws, s)
+                    if ov > best_ov:
+                        best, best_ov = spk, ov
+                    gap = max(s - we, ws - e, 0.0)  # 0 if overlapping
+                    if nearest_gap is None or gap < nearest_gap:
+                        nearest, nearest_gap = spk, gap
+                if mid_spk is not None:
+                    return mid_spk
+                return best if best is not None else nearest
 
-        final_output = []
-        for text, ws, we in words:
-            spk = word_speaker(ws, we) or "SPEAKER_00"
-            if final_output and final_output[-1]["speaker"] == spk:
-                final_output[-1]["end"] = we
-                final_output[-1]["text"] += " " + text
-            else:
-                final_output.append(
-                    {"start": ws, "end": we, "speaker": spk, "text": text}
-                )
-
-        # 3b. Smoothing: absorb ultra-short blocks (mis-split fragments, e.g. a
-        # single word grabbed by a brief overlapping turn) into a neighbor —
-        # bridging when both neighbors are the same speaker — then regroup.
-        if args.min_turn > 0 and final_output:
-            for i, b in enumerate(final_output):
-                if (b["end"] - b["start"]) >= args.min_turn:
-                    continue
-                prev = final_output[i - 1] if i > 0 else None
-                nxt = final_output[i + 1] if i + 1 < len(final_output) else None
-                if prev and nxt and prev["speaker"] == nxt["speaker"]:
-                    b["speaker"] = prev["speaker"]
-                elif prev and nxt:
-                    longer = prev if (prev["end"] - prev["start"]) >= (nxt["end"] - nxt["start"]) else nxt
-                    b["speaker"] = longer["speaker"]
-                elif prev:
-                    b["speaker"] = prev["speaker"]
-                elif nxt:
-                    b["speaker"] = nxt["speaker"]
-            regrouped = []
-            for b in final_output:
-                if regrouped and regrouped[-1]["speaker"] == b["speaker"]:
-                    regrouped[-1]["end"] = b["end"]
-                    regrouped[-1]["text"] += " " + b["text"]
+            final_output = []
+            for text, ws, we in words:
+                spk = word_speaker(ws, we) or "SPEAKER_00"
+                if final_output and final_output[-1]["speaker"] == spk:
+                    final_output[-1]["end"] = we
+                    final_output[-1]["text"] += " " + text
                 else:
-                    regrouped.append(b)
-            final_output = regrouped
+                    final_output.append(
+                        {"start": ws, "end": we, "speaker": spk, "text": text}
+                    )
 
-        # 4. Save
-        base_name = os.path.basename(audio_file)
-        output_txt = os.path.join(output_dir, f"{base_name}.txt")
-        with open(output_txt, "w") as f:
-            for item in final_output:
-                line = f"[{format_time(item['start'])} --> {format_time(item['end'])}] {item['speaker']}: {item['text']}"
-                f.write(line + "\n")
-                print(line)
+            # 3b. Smoothing: absorb ultra-short blocks (mis-split fragments, e.g. a
+            # single word grabbed by a brief overlapping turn) into a neighbor —
+            # bridging when both neighbors are the same speaker — then regroup.
+            if args.min_turn > 0 and final_output:
+                for i, b in enumerate(final_output):
+                    if (b["end"] - b["start"]) >= args.min_turn:
+                        continue
+                    prev = final_output[i - 1] if i > 0 else None
+                    nxt = final_output[i + 1] if i + 1 < len(final_output) else None
+                    if prev and nxt and prev["speaker"] == nxt["speaker"]:
+                        b["speaker"] = prev["speaker"]
+                    elif prev and nxt:
+                        longer = prev if (prev["end"] - prev["start"]) >= (nxt["end"] - nxt["start"]) else nxt
+                        b["speaker"] = longer["speaker"]
+                    elif prev:
+                        b["speaker"] = prev["speaker"]
+                    elif nxt:
+                        b["speaker"] = nxt["speaker"]
+                regrouped = []
+                for b in final_output:
+                    if regrouped and regrouped[-1]["speaker"] == b["speaker"]:
+                        regrouped[-1]["end"] = b["end"]
+                        regrouped[-1]["text"] += " " + b["text"]
+                    else:
+                        regrouped.append(b)
+                final_output = regrouped
 
-        logging.info(f"Done! Total time: {time.time() - start_time:.2f}s")
+            # 4. Save
+            base_name = os.path.basename(audio_file)
+            output_txt = os.path.join(output_dir, f"{base_name}.txt")
+            with open(output_txt, "w") as f:
+                for item in final_output:
+                    line = f"[{format_time(item['start'])} --> {format_time(item['end'])}] {item['speaker']}: {item['text']}"
+                    f.write(line + "\n")
+                    print(line)
+
+            logging.info(f"Done! Total time: {time.time() - start_time:.2f}s")
     finally:
         if os.path.exists(working_file):
             os.remove(working_file)
