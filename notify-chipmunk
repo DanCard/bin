@@ -46,7 +46,7 @@ MAX_CHARS = 200          # guard against runaway-long titles
 QUEUE_MAX = 5            # drop extras rather than backlog if flooded
 # Notification titles matching any of these substrings (case-insensitive) are
 # silently ignored — e.g. Bluetooth/network "connected"/"disconnected" spam.
-SUPPRESS_SUBSTRINGS = ("connected", "disconnected")
+SUPPRESS_SUBSTRINGS = ("connection", "disconnected")
 # To add a nature/chirp cue before the voice, uncomment and set a path:
 # CHIRP = ["paplay", "/home/dcar/.local/share/sounds/chirp.oga"]
 CHIRP = None

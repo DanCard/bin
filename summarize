@@ -11,24 +11,70 @@ from tqdm import tqdm
 
 # Configuration
 LLAMA_SERVER_BIN = os.path.expanduser("~/github/llama.cpp/build/bin/llama-server")
-MODEL_PATH = os.path.expanduser("~/llms/qwen3/6/mtp-27B-UD-Q8_K_XL.gguf")
-MODEL_ID = "llama.cpp/mtp-27B-UD-Q8_K_XL.gguf"
 LLAMA_URL = "http://localhost:8080"
 DEFAULT_MAX_TOKENS = -1
 LOG_PATH = "llama-server.log"
 
-SYSTEM_PROMPT = (
-    "You are an expert transcription analyst. Produce a verbatim-adjacent, exhaustive report of the meeting. "
-    "Capture the full depth of technical discussions, side-bars, and nuanced context. Do not omit details for brevity. "
-    "Use markdown formatting with clear headers, bullet and numbered points, and tables for structured data."
-)
+MODELS = {
+    "qwen": {
+        "path": os.path.expanduser("~/llms/qwen3/6/mtp-27B-UD-Q8_K_XL.gguf"),
+        "args": [
+            "--spec-type", "draft-mtp",
+            "--spec-draft-n-max", "3",
+            "-ngl", "999",
+            "-c", "128000",
+            "-fa", "on",
+            "-ctk", "q8_0",
+            "-ctv", "q8_0",
+            "--temp", "0",
+        ],
+    },
+    "gemma": {
+        "path": os.path.expanduser("~/llms/gemma/4/bartowski-31B-it-Q8_0.gguf"),
+        "args": [
+            "-ngl", "999",
+            "-c", "128000",
+            "--no-mmap",
+            "--temp", "0",
+            "--no-warmup",
+        ],
+    },
+}
 
-USER_PROMPT_PREFIX = (
-    "Here is the full transcript of a meeting. Provide an incredibly detailed record covering every topic, "
-    "every decision, and every specific detail mentioned. Use inline quotes for significant statements. "
-    "Include a list of attendees and table of comprehensive Action Items."
-    "Do not summarize or condense"
-)
+PROMPTS = {
+    "long": {
+        "system": (
+            "You are an expert transcription analyst. Produce a verbatim-adjacent, exhaustive report of the meeting. "
+            "Capture the full depth of technical discussions, side-bars, and nuanced context. Do not omit details for brevity. "
+            "Use markdown formatting with clear headers, bullet and numbered points, and tables for structured data."
+        ),
+        "user_prefix": (
+            "Here is the full transcript of a meeting. Provide an incredibly detailed record covering every topic, "
+            "every decision, and every specific detail mentioned. Use inline quotes for significant statements. "
+            "Include a list of attendees and table of comprehensive Action Items."
+            "Do not summarize or condense"
+        ),
+    },
+    "summary": {
+        "system": (
+            "You are an expert transcription analyst. Produce clear, well-organized meeting notes from the transcript. "
+            "Use markdown formatting with clear headers, numbered points, bullet points, and tables for structured data."
+        ),
+        "user_prefix": (
+            "Here is the full transcript of a meeting. Generate meeting notes covering the topics discussed, "
+            "decisions made, and action items. When people introduce themselves, capture those introductions in "
+            "detail — name, role, organization, background, and anything else they say about themselves."
+            "Include a list of attendees and a table of Action Items."
+        ),
+    },
+}
+
+# (mode, model, output suffix) — ordered so the model swaps at most once per run
+JOBS = [
+    ("long", "qwen", "long.md"),
+    ("summary", "qwen", "summary-qwen.md"),
+    ("summary", "gemma", "summary-gemma.md"),
+]
 
 def is_server_running(url):
     """Check if the server is responding to API requests."""
@@ -39,15 +85,67 @@ def is_server_running(url):
         return False
 
 
+def get_loaded_model(url):
+    """Return the model id reported by a responding server, or None."""
+    try:
+        response = requests.get(f"{url}/v1/models", timeout=2)
+        response.raise_for_status()
+        return response.json()["data"][0]["id"]
+    except (requests.exceptions.RequestException, KeyError, IndexError, ValueError):
+        return None
+
+
 def is_process_running(name):
-    """Check if a process with the given name exists."""
-    for proc in psutil.process_iter(['name']):
-        if proc.info['name'] == name:
+    """Check if a live (non-zombie) process with the given name exists."""
+    for proc in psutil.process_iter(['name', 'status']):
+        if proc.info['name'] == name and proc.info['status'] != psutil.STATUS_ZOMBIE:
             return True
     return False
 
 
-def start_server(model_path):
+def stop_server():
+    """Terminate any running llama-server processes and wait for them to exit."""
+    procs = [p for p in psutil.process_iter(['name']) if p.info['name'] == "llama-server"]
+    if not procs:
+        return
+    print(f"🛑 Stopping llama-server (pid {', '.join(str(p.pid) for p in procs)})...")
+    for p in procs:
+        try:
+            p.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(procs, timeout=30)
+    for p in alive:
+        try:
+            p.kill()
+        except psutil.NoSuchProcess:
+            pass
+    psutil.wait_procs(alive, timeout=10)
+
+
+def ensure_server(model_name, url):
+    """Make sure llama-server is running with the requested model, swapping if needed."""
+    model = MODELS[model_name]
+    wanted = os.path.basename(model["path"])
+    loaded = get_loaded_model(url)
+    if loaded is not None:
+        if wanted in loaded:
+            print(f"✅ Llama-server is already running with {wanted}.")
+            return True
+        print(f"🔄 Llama-server has {loaded}, but {wanted} is needed. Swapping models...")
+        stop_server()
+    if not start_server(model):
+        return False
+    # A server that was still starting up when we checked may have the wrong model.
+    loaded = get_loaded_model(url)
+    if loaded is not None and wanted not in loaded:
+        print(f"🔄 Server came up with {loaded}, but {wanted} is needed. Swapping models...")
+        stop_server()
+        return start_server(model)
+    return True
+
+
+def start_server(model):
     """Start the llama-server in the background if it's not already running."""
     if is_server_running(LLAMA_URL):
         print("✅ Llama-server is already running and responding.")
@@ -57,18 +155,7 @@ def start_server(model_path):
         print("⏳ Llama-server process is running but not responding yet. Waiting...")
     else:
         print("🚀 Llama-server is not running. Starting it now...")
-        cmd = [
-            LLAMA_SERVER_BIN,
-            "-m", model_path,
-            "--spec-type", "draft-mtp",
-            "--spec-draft-n-max", "3",
-            "-ngl", "999",
-            "-c", "128000",
-            "-fa", "off",
-            "-ctk", "q8_0",
-            "-ctv", "q8_0",
-            "--temp", "0"
-        ]
+        cmd = [LLAMA_SERVER_BIN, "-m", model["path"]] + model["args"]
 
         print(f"📡 Command issued: {' '.join(cmd)}")
         print(f"📝 Logs are being written to {LOG_PATH}")
@@ -93,6 +180,9 @@ def start_server(model_path):
         if is_server_running(LLAMA_URL):
             print("\n✅ Llama-server is ready!")
             return True
+        if not is_process_running("llama-server"):
+            print(f"\n❌ Error: llama-server exited during startup. Check {LOG_PATH}")
+            return False
         print(".", end="", flush=True)
         time.sleep(2)
 
@@ -100,25 +190,19 @@ def start_server(model_path):
     return False
 
 
-def generate_summary(transcript_path, output_path, max_tokens, url):
+def generate_summary(transcript, output_path, max_tokens, url, mode, model_name):
     """Send the transcript to the server and stream the response to a file."""
-    if not os.path.exists(transcript_path):
-        print(f"❌ Error: File not found: {transcript_path}")
-        return
+    prompts = PROMPTS[mode]
 
-    with open(transcript_path, 'r', encoding='utf-8', errors='replace') as f:
-        transcript = f.read()
-
-    print(f"📖 Read transcript from {transcript_path} ({len(transcript)} chars)")
-    print(f"📝 Generating exhaustive meeting record → {output_path}")
+    print(f"📝 Generating {mode} notes with {model_name} → {output_path}")
     print(f"💡 Monitor progress in another terminal: tail -f '{output_path}'")
     print("-" * 40)
 
     payload = {
-        "model": MODEL_ID,
+        "model": os.path.basename(MODELS[model_name]["path"]),
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"{USER_PROMPT_PREFIX}\n\n{transcript}"}
+            {"role": "system", "content": prompts["system"]},
+            {"role": "user", "content": f"{prompts['user_prefix']}\n\n{transcript}"}
         ],
         "max_tokens": max_tokens,
         "temperature": 0,
@@ -210,7 +294,7 @@ def generate_summary(transcript_path, output_path, max_tokens, url):
                                 gen_bar.set_postfix_str(f"{tps:.1f} tok/s")
 
         close_bars()
-        print(f"\n✅ Detailed record saved to: {output_path}")
+        print(f"\n✅ {mode.capitalize()} notes ({model_name}) saved to: {output_path}")
 
     except requests.exceptions.RequestException as e:
         close_bars()
@@ -219,13 +303,15 @@ def generate_summary(transcript_path, output_path, max_tokens, url):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate exhaustive meeting records using local LLM with progress tracking."
+        description="Generate meeting notes using local LLMs: a long record (qwen) "
+                    "plus summary notes from both qwen and gemma."
     )
     parser.add_argument("transcript", help="Path to the transcript text file.")
     parser.add_argument(
         "output",
         nargs="?",
-        help="Path to the output markdown file (default: transcript.txt.md)."
+        help="Base path for output files (default: the transcript path). "
+             "Outputs are <base>.long.md, <base>.summary-qwen.md, <base>.summary-gemma.md."
     )
     parser.add_argument(
         "--max-tokens",
@@ -238,19 +324,50 @@ def main():
         default=LLAMA_URL,
         help=f"llama-server URL (default: {LLAMA_URL})."
     )
+    select = parser.add_mutually_exclusive_group()
+    select.add_argument("--long-only", action="store_true",
+                        help="Only generate the long record (qwen).")
+    select.add_argument("--summary-only", action="store_true",
+                        help="Only generate the summaries (qwen and gemma).")
+    select.add_argument("--qwen-only", action="store_true",
+                        help="Only generate the qwen outputs (long + summary).")
+    select.add_argument("--gemma-only", action="store_true",
+                        help="Only generate the gemma summary.")
 
     args = parser.parse_args()
 
-    # Default output path
-    if not args.output:
-        args.output = args.transcript + ".md"
-
-    # 1. Ensure server is running
-    if not start_server(MODEL_PATH):
+    if not os.path.exists(args.transcript):
+        print(f"❌ Error: File not found: {args.transcript}")
         sys.exit(1)
 
-    # 2. Generate summary
-    generate_summary(args.transcript, args.output, args.max_tokens, args.url)
+    base = args.output or args.transcript
+    if base.endswith(".md"):
+        base = base[:-len(".md")]
+
+    jobs = JOBS
+    if args.long_only:
+        jobs = [j for j in jobs if j[0] == "long"]
+    elif args.summary_only:
+        jobs = [j for j in jobs if j[0] == "summary"]
+    elif args.qwen_only:
+        jobs = [j for j in jobs if j[1] == "qwen"]
+    elif args.gemma_only:
+        jobs = [j for j in jobs if j[1] == "gemma"]
+
+    with open(args.transcript, 'r', encoding='utf-8', errors='replace') as f:
+        transcript = f.read()
+    print(f"📖 Read transcript from {args.transcript} ({len(transcript)} chars)")
+
+    # Run jobs for the already-loaded model first to minimize model swaps
+    loaded = get_loaded_model(args.url)
+    if loaded:
+        jobs = sorted(jobs, key=lambda j: os.path.basename(MODELS[j[1]]["path"]) not in loaded)
+
+    for mode, model_name, suffix in jobs:
+        if not ensure_server(model_name, args.url):
+            sys.exit(1)
+        generate_summary(transcript, f"{base}.{suffix}", args.max_tokens,
+                         args.url, mode, model_name)
 
 
 if __name__ == "__main__":
