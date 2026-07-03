@@ -44,6 +44,9 @@ def build_speak(text):
 
 MAX_CHARS = 200          # guard against runaway-long titles
 QUEUE_MAX = 5            # drop extras rather than backlog if flooded
+# Notification titles matching any of these substrings (case-insensitive) are
+# silently ignored — e.g. Bluetooth/network "connected"/"disconnected" spam.
+SUPPRESS_SUBSTRINGS = ("connected", "disconnected")
 # To add a nature/chirp cue before the voice, uncomment and set a path:
 # CHIRP = ["paplay", "/home/dcar/.local/share/sounds/chirp.oga"]
 CHIRP = None
@@ -104,6 +107,9 @@ def on_message(_bus, message) -> None:
         summary = str(args[0]) if args else ""   # fall back to app name
     summary = summary.strip()[:MAX_CHARS]
     if not summary:
+        return
+    low = summary.lower()
+    if any(s in low for s in SUPPRESS_SUBSTRINGS):
         return
     try:
         speech_q.put_nowait(summary)

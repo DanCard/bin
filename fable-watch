@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+#
+# fable-watch — poll until Claude Fable 5 (claude-fable-5) becomes available
+#               to your account in Claude Code, then notify you.
+#
+# The availability probe is a tiny headless query against the model. While
+# access hasn't rolled out to you, Claude Code replies:
+#     "Claude Fable 5 is currently unavailable."
+# Once you have access, it replies normally ("ok"), which we treat as available.
+#
+# Runs silently and prints nothing until the model is available, then shows a
+# banner, fires a desktop notification, and exits.
+#
+# Usage:
+#   fable-watch                 # poll every 8 min, stay silent, banner+notify when live
+#   fable-watch --once          # single check; exit 0 if available, 1 if not (good for cron)
+#   fable-watch --interval 300  # poll every 300s instead of 480s
+#   fable-watch --model NAME    # probe a different model id
+#
+set -uo pipefail
+
+MODEL="claude-fable-5"
+INTERVAL=300
+ONCE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --once)      ONCE=1; shift ;;
+    --interval)  INTERVAL="$2"; shift 2 ;;
+    --model)     MODEL="$2"; shift 2 ;;
+    -h|--help)   grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+# Probe once. Prints nothing. Returns:
+#   0 = available   1 = not yet available   2 = inconclusive (error/network)
+probe() {
+  local out
+  out="$(timeout 90 claude -p "reply with just: ok" --model "$MODEL" 2>&1)"
+  if grep -qi "currently unavailable" <<<"$out"; then
+    return 1
+  elif grep -qiw "ok" <<<"$out"; then
+    return 0
+  else
+    # Unexpected output (auth error, rate limit, network). Stay silent, keep waiting.
+    return 2
+  fi
+}
+
+notify() {
+  local msg="Claude Fable 5 ($MODEL) is now available in Claude Code!"
+  cat <<'BANNER'
+
+╔══════════════════════════════════════════════════╗
+║                                                  ║
+║        🎉  CLAUDE FABLE 5 IS AVAILABLE  🎉        ║
+║                                                  ║
+╚══════════════════════════════════════════════════╝
+BANNER
+  echo "  $msg"
+  echo
+  printf '\a'  # terminal bell
+  command -v notify-send >/dev/null 2>&1 && notify-send -u critical "Fable 5 available" "$msg" 2>/dev/null
+  command -v paplay >/dev/null 2>&1 && paplay /usr/share/sounds/freedesktop/stereo/complete.oga 2>/dev/null &
+}
+
+if [[ "$ONCE" == 1 ]]; then
+  probe; rc=$?
+  # Silent unless available. Exit code carries the result: 0=available 1=not yet 2=inconclusive
+  [[ $rc -eq 0 ]] && notify
+  exit $rc
+fi
+
+# Silent poll loop: no output until available.
+while true; do
+  probe; rc=$?
+  if [[ $rc -eq 0 ]]; then
+    notify
+    exit 0
+  fi
+  sleep "$INTERVAL"
+done

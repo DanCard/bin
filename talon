@@ -1,0 +1,1 @@
+/home/dcar/.local/share/talon-app/run.sh
