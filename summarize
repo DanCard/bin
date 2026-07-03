@@ -29,16 +29,6 @@ MODELS = {
             "--temp", "0",
         ],
     },
-    "gemma": {
-        "path": os.path.expanduser("~/llms/gemma/4/bartowski-31B-it-Q8_0.gguf"),
-        "args": [
-            "-ngl", "999",
-            "-c", "128000",
-            "--no-mmap",
-            "--temp", "0",
-            "--no-warmup",
-        ],
-    },
 }
 
 PROMPTS = {
@@ -46,12 +36,12 @@ PROMPTS = {
         "system": (
             "You are an expert transcription analyst. Produce a verbatim-adjacent, exhaustive report of the meeting. "
             "Capture the full depth of technical discussions, side-bars, and nuanced context. Do not omit details for brevity. "
-            "Use markdown formatting with clear headers, bullet and numbered points, and tables for structured data."
+            "Use markdown formatting with clear headers, numbered and bullet points, and tables for structured data."
         ),
         "user_prefix": (
             "Here is the full transcript of a meeting. Provide an incredibly detailed record covering every topic, "
             "every decision, and every specific detail mentioned. Use inline quotes for significant statements. "
-            "Include a list of attendees and table of comprehensive Action Items."
+            "Include a list of attendees and table of action Items."
             "Do not summarize or condense"
         ),
     },
@@ -61,19 +51,18 @@ PROMPTS = {
             "Use markdown formatting with clear headers, numbered points, bullet points, and tables for structured data."
         ),
         "user_prefix": (
-            "Here is the full transcript of a meeting. Generate meeting notes covering the topics discussed, "
-            "decisions made, and action items. When people introduce themselves, capture those introductions in "
-            "detail — name, role, organization, background, and anything else they say about themselves."
-            "Include a list of attendees and a table of Action Items."
+            "Here is the full transcript of a meeting. Generate meeting notes."
+            "decisions made, and action items. If someone spends time introducing them self, capture the introduction in extreme"
+            "detail as a topic or subtopic — name, role, organization, background, anything else they say about themselves, and inline quotes.  "
+            "Include a list of attendees, decisions made, and a table of Action Items."
         ),
     },
 }
 
-# (mode, model, output suffix) — ordered so the model swaps at most once per run
+# (mode, model, output suffix)
 JOBS = [
     ("long", "qwen", "long.md"),
-    ("summary", "qwen", "summary-qwen.md"),
-    ("summary", "gemma", "summary-gemma.md"),
+    ("summary", "qwen", "summary.md"),
 ]
 
 def is_server_running(url):
@@ -303,15 +292,15 @@ def generate_summary(transcript, output_path, max_tokens, url, mode, model_name)
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate meeting notes using local LLMs: a long record (qwen) "
-                    "plus summary notes from both qwen and gemma."
+        description="Generate meeting notes using a local LLM: a long record "
+                    "plus summary notes."
     )
     parser.add_argument("transcript", help="Path to the transcript text file.")
     parser.add_argument(
         "output",
         nargs="?",
         help="Base path for output files (default: the transcript path). "
-             "Outputs are <base>.long.md, <base>.summary-qwen.md, <base>.summary-gemma.md."
+             "Outputs are <base>.long.md and <base>.summary.md."
     )
     parser.add_argument(
         "--max-tokens",
@@ -326,13 +315,9 @@ def main():
     )
     select = parser.add_mutually_exclusive_group()
     select.add_argument("--long-only", action="store_true",
-                        help="Only generate the long record (qwen).")
+                        help="Only generate the long record.")
     select.add_argument("--summary-only", action="store_true",
-                        help="Only generate the summaries (qwen and gemma).")
-    select.add_argument("--qwen-only", action="store_true",
-                        help="Only generate the qwen outputs (long + summary).")
-    select.add_argument("--gemma-only", action="store_true",
-                        help="Only generate the gemma summary.")
+                        help="Only generate the summary notes.")
 
     args = parser.parse_args()
 
@@ -349,19 +334,10 @@ def main():
         jobs = [j for j in jobs if j[0] == "long"]
     elif args.summary_only:
         jobs = [j for j in jobs if j[0] == "summary"]
-    elif args.qwen_only:
-        jobs = [j for j in jobs if j[1] == "qwen"]
-    elif args.gemma_only:
-        jobs = [j for j in jobs if j[1] == "gemma"]
 
     with open(args.transcript, 'r', encoding='utf-8', errors='replace') as f:
         transcript = f.read()
     print(f"📖 Read transcript from {args.transcript} ({len(transcript)} chars)")
-
-    # Run jobs for the already-loaded model first to minimize model swaps
-    loaded = get_loaded_model(args.url)
-    if loaded:
-        jobs = sorted(jobs, key=lambda j: os.path.basename(MODELS[j[1]]["path"]) not in loaded)
 
     for mode, model_name, suffix in jobs:
         if not ensure_server(model_name, args.url):
