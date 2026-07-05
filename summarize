@@ -20,9 +20,9 @@ PROMPTS = {
         "user_prefix": (
             "Here is the full transcript of a meeting. Provide an incredibly detailed record covering every topic, "
             "every decision, and every specific detail mentioned. Use inline quotes for significant statements. "
-            "Include a list of attendees and table of action Items."
-            "Do not summarize or condense. "
-            "Start the document with a level-1 heading whose title begins with \"Long: \"."
+            "Include a list of attendees and table of action Items. "
+            "If someone spends time introducing them self, capture the introduction in extreme "
+            "detail as a topic or subtopic — name, role, organization, background, anything else they say about themselves, and inline quotes."
         ),
     },
     "short": {
@@ -31,17 +31,16 @@ PROMPTS = {
             "Use markdown formatting with clear headers, numbered points, bullet points, and tables for structured data."
         ),
         "user_prefix": (
-            "Here is the full transcript of a meeting. Generate meeting notes."
-            "decisions made, and action items. If someone spends time introducing them self, capture the introduction in extreme"
-            "detail as a topic or subtopic — name, role, organization, background, anything else they say about themselves, and inline quotes.  "
-            "Include a list of attendees, decisions made, and a table of Action Items. "
-            "Start the document with a level-1 heading whose title begins with \"Short: \"."
+            "Here is the full transcript of a meeting. Generate meeting notes covering every topic discussed in detail, decisions made, and action items. "
+            "If someone spends time introducing them self, capture the introduction in extreme "
+            "detail as a topic or subtopic — name, role, organization, background, anything else they say about themselves, and inline quotes. "
+            "Include a list of attendees, decisions made, and a table of Action Items."
         ),
     },
 }
 
 # Output files are <dir>/<mode>-<name>.md, one per mode.
-JOBS = ["long", "short"]
+JOBS = ["long"]
 
 
 def get_loaded_model(url):
@@ -167,15 +166,15 @@ def generate_summary(transcript, output_path, max_tokens, url, mode, model_id):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate meeting notes using the currently served local LLM: "
-                    "a long record plus short summary notes."
+        description="Generate meeting notes using the currently served local LLM "
+                    "(defaults to long record)."
     )
     parser.add_argument("transcript", help="Path to the transcript text file.")
     parser.add_argument(
         "output",
         nargs="?",
         help="Base path for output files (default: the transcript path). "
-             "Outputs are long-<name>.md and short-<name>.md in the base's directory."
+             "Outputs are long-<name>.md (and short-<name>.md if short version requested) in the base's directory."
     )
     parser.add_argument(
         "--max-tokens",
@@ -190,9 +189,11 @@ def main():
     )
     select = parser.add_mutually_exclusive_group()
     select.add_argument("--long-only", action="store_true",
-                        help="Only generate the long record.")
-    select.add_argument("--short-only", action="store_true",
+                        help="Only generate the long record (default).")
+    select.add_argument("--short-only", "--short", action="store_true",
                         help="Only generate the short summary notes.")
+    select.add_argument("--with-short", "--both", action="store_true",
+                        help="Generate both long and short notes.")
 
     args = parser.parse_args()
 
@@ -205,11 +206,13 @@ def main():
         base = base[:-len(".md")]
     base_dir, base_name = os.path.split(base)
 
-    jobs = JOBS
-    if args.long_only:
-        jobs = ["long"]
-    elif args.short_only:
+    jobs = list(JOBS)
+    if args.short_only:
         jobs = ["short"]
+    elif args.with_short:
+        jobs = ["long", "short"]
+    elif args.long_only:
+        jobs = ["long"]
 
     model_id = get_loaded_model(args.url)
     if model_id is None:
