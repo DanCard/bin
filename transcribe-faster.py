@@ -767,7 +767,8 @@ def main():
 
             # 4. Save
             base_name = os.path.basename(audio_file)
-            output_txt = os.path.join(output_dir, f"{base_name}.txt")
+            prefix_name = base_name.removeprefix("transcription-").removeprefix("transcription_")
+            output_txt = os.path.join(output_dir, f"transcription-{prefix_name}.txt")
             with open(output_txt, "w") as f:
                 for item in final_output:
                     line = f"[{format_time(item['start'])} --> {format_time(item['end'])}] {item['speaker']}: {item['text']}"
