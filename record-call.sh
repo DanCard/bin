@@ -30,7 +30,7 @@ ORIGINAL_MIC="alsa_input.usb-EMEET_HD_Webcam_eMeet_C950_A230803002402311-02.anal
 
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 NAME=${1:-call}
-OUTFILE="${NAME}-${TIMESTAMP}.m4a"
+OUTFILE="audio-${NAME#audio-}-${TIMESTAMP}.m4a"
 
 echo "------------------------------------------------"
 echo "RECORDING STARTED (all system audio + mic)"
