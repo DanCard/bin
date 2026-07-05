@@ -20,7 +20,7 @@ PROMPTS = {
         "user_prefix": (
             "Here is the full transcript of a meeting. Provide an incredibly detailed record covering every topic, "
             "every decision, and every specific detail mentioned. Use inline quotes for significant statements. "
-            "Include a list of attendees and table of action Items. "
+            "Include a list of attendees and table of action items. "
             "If someone spends time introducing them self, capture the introduction in extreme "
             "detail as a topic or subtopic — name, role, organization, background, anything else they say about themselves, and inline quotes."
         ),
@@ -34,12 +34,12 @@ PROMPTS = {
             "Here is the full transcript of a meeting. Generate meeting notes covering every topic discussed in detail, decisions made, and action items. "
             "If someone spends time introducing them self, capture the introduction in extreme "
             "detail as a topic or subtopic — name, role, organization, background, anything else they say about themselves, and inline quotes. "
-            "Include a list of attendees, decisions made, and a table of Action Items."
+            "Include a list of attendees, decisions made, and a table of action items."
         ),
     },
 }
 
-# Output files are <dir>/<mode>-<name>.md, one per mode.
+# Output files are <dir>/summary-<mode>-<name>.md, one per mode.
 JOBS = ["long"]
 
 
@@ -174,7 +174,7 @@ def main():
         "output",
         nargs="?",
         help="Base path for output files (default: the transcript path). "
-             "Outputs are long-<name>.md (and short-<name>.md if short version requested) in the base's directory."
+             "Outputs are summary-long-<name>.md (and summary-short-<name>.md if short version requested) in the base's directory."
     )
     parser.add_argument(
         "--max-tokens",
@@ -204,7 +204,10 @@ def main():
     base = args.output or args.transcript
     if base.endswith(".md"):
         base = base[:-len(".md")]
+    elif base.endswith(".txt"):
+        base = base[:-len(".txt")]
     base_dir, base_name = os.path.split(base)
+    prefix_name = base_name.removeprefix("summary-").removeprefix("summary_")
 
     jobs = list(JOBS)
     if args.short_only:
@@ -225,7 +228,7 @@ def main():
     print(f"📖 Read transcript from {args.transcript} ({len(transcript)} chars)")
 
     for mode in jobs:
-        output_path = os.path.join(base_dir, f"{mode}-{base_name}.md")
+        output_path = os.path.join(base_dir, f"summary-{mode}-{prefix_name}.md")
         generate_summary(transcript, output_path, args.max_tokens,
                          args.url, mode, model_id)
 
