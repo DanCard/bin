@@ -1,0 +1,26 @@
+#!/bin/bash
+# mmdd - Create a directory named MMDD (current month and day) and cd into it.
+#
+# NOTE: Because standard scripts run in a subshell, running './mmdd' will not
+# change your current shell's directory. To use it, you must source it:
+#     source mmdd
+#
+# For convenience, add this alias/function to your ~/.bashrc or ~/.zshrc:
+#     alias mmdd='source mmdd'
+# or:
+#     mmdd() { source mmdd; }
+
+# Check if the script is run directly instead of sourced
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    echo "Warning: This script must be sourced to navigate your current shell into the new directory."
+    echo "Please run: source mmdd"
+    echo "Or add an alias: alias mmdd='source mmdd'"
+fi
+
+DIR_NAME=$(date +%m%d)
+
+if mkdir -p "$DIR_NAME"; then
+    cd "$DIR_NAME"
+else
+    echo "Error: Failed to create directory '$DIR_NAME'"
+fi
