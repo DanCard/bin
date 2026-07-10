@@ -1,4 +1,42 @@
 #!/home/dcar/.venvs/transcribe/bin/python
+"""
+Speaker enrollment
+------------------
+--speakers DIR (default ~/.config/transcribe/speakers if it exists) holds known
+voices. Each diarized speaker in a call is compared against these voiceprints and
+labeled by name once cosine similarity clears --enroll-threshold (default 0.55).
+
+Two ways to store a person's reference clips in that folder:
+  <Name>.<ext>   a single reference clip -> one-clip voiceprint.
+  <Name>/        a folder of clips (any filenames) -> voiceprint is the mean of all
+                 clips' embeddings, made robust by dropping outliers: the medoid
+                 clip is kept and any clip below 0.45 cosine to it is voted out
+                 (see _consistent_subset). This is the layout --harvest/--label
+                 write into.
+If both exist for the same name, the folder wins.
+
+--enroll (re)builds the cached <Name>.npy voiceprint for EVERY name in --speakers,
+not just the one you're adding -- it's cheap (seconds per speaker; no diarization
+or transcription involved), so there's no reason to hand-pick. Run it with no
+audio_file to just rebuild the cache and exit.
+
+Growing voiceprints over time:
+  --harvest              after a run, for every speaker matched at cosine >=
+                         --harvest-min-cosine (default 0.80, stricter than the
+                         match threshold so a borderline mislabel can't poison the
+                         voiceprint), cut their longest clean single-speaker turns
+                         (>= --harvest-min-seg) into <Name>/ and rebuild that
+                         voiceprint. Capped at --harvest-clips new clips/run.
+  --label SPEAKER_xx=Name
+                         same harvesting, but forced for a specific speaker
+                         regardless of match/confidence -- use to fix a miss or
+                         enroll someone new.
+
+To add someone without re-running transcription/diarization on a whole call (slow
+on long recordings), cut clips yourself with ffmpeg -- 16kHz mono wav, using
+timestamps from an existing transcript -- straight into <speakers>/<Name>/, then
+run `transcribe --enroll` to fold them into the cache.
+"""
 import os
 import sys
 import warnings
