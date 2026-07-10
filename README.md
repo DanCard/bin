@@ -25,6 +25,7 @@ These scripts are not a polished product and may be machine-specific.
 - `check_fans.sh`, `fan-curve`, `sys-logging.sh`: fan and thermal monitoring/tuning
 - `record-call.sh`, `signal-record.sh`, `screen-record-1080p`: recording helpers
 - `signal-backup.sh`: backup and decrypted export helper for Signal Desktop conversations
+- `signal-remove-member.sh`: utility to remove an individual from all admin-controlled Signal group chats
 - `whisper.py`, `fast-whisper.py`, `qwen-transcribe.py`, `summarize`: transcription/summarization workflows
 - `newest`: quick helper to find most recently modified files
 
