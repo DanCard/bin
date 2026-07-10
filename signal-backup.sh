@@ -11,7 +11,7 @@
 set -e
 
 # --- Default Paths and Variables ---
-DEST_DIR="$HOME/Signal-Backups"
+DEST_DIR="$HOME/backups/signal"
 SOURCE_DIR=""
 BACKUP_RAW=true
 BACKUP_EXPORT=true
@@ -31,7 +31,7 @@ Usage: $(basename "$0") [OPTIONS]
 Safely back up and export Signal Desktop conversations and attachments.
 
 Options:
-  -d, --dest DIR         Destination folder for backups (default: ~/Signal-Backups)
+  -d, --dest DIR         Destination folder for backups (default: ~/backups/signal)
   -s, --source DIR       Signal configuration folder (default: auto-detected)
   --no-raw               Skip raw SQLite database and config backup
   --no-export            Skip human-readable export (HTML/Markdown/JSON)
