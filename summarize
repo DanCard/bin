@@ -229,6 +229,9 @@ def main():
 
     for mode in jobs:
         output_path = os.path.join(base_dir, f"summary-{mode}-{prefix_name}.md")
+        if os.path.exists(output_path):
+            print(f"⚠️ Output file already exists: {output_path}. Skipping.")
+            continue
         generate_summary(transcript, output_path, args.max_tokens,
                          args.url, mode, model_id)
 
