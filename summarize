@@ -20,7 +20,7 @@ PROMPTS = {
         "user_prefix": (
             "Here is the full transcript of a meeting. Provide an incredibly detailed record covering every topic, "
             "every decision, and every specific detail mentioned. Use inline quotes for significant statements. "
-            "Include a list of attendees and table of action items. "
+            "Include a list of attendees and table or list of action items. "
             "If someone spends time introducing them self, capture the introduction in extreme "
             "detail as a topic or subtopic — name, role, organization, background, anything else they say about themselves, and inline quotes."
         ),
