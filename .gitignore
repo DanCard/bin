@@ -10,6 +10,7 @@ atop
 # Electron app builds and large binary directories
 Antigravity-x64/
 Antigravity/
+python-3.14t/
 
 # Binary files
 *.so
@@ -32,6 +33,7 @@ __pycache__/
 *.m4a
 
 old/
+backup/
 .tmp/
 node_modules/
 package.json
