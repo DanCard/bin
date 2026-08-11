@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Launch the Signal Desktop dev build with headshot mode.
+#
+# Uses its own profile (~/.config/Signal-development), so it runs alongside a
+# normal Signal install without touching it. The linked-device session lives in
+# that profile and survives rebuilds.
+#
+# Pass --rebuild after changing code under ts/ or stylesheets/.
+
+set -euo pipefail
+
+REPO="$HOME/github/Signal-Desktop"
+PNPM_CJS="$HOME/.cache/node/corepack/pnpm/11.5.2/bin/pnpm.cjs"
+
+cd "$REPO"
+
+if [[ ! -f config/local-development.json ]]; then
+  cat >&2 <<'EOF'
+error: config/local-development.json is missing.
+
+Without it the dev build talks to Signal's STAGING servers and a normal phone
+cannot link to it ("network error"). Recreate it with:
+
+  node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('config/production.json','utf8'));p.updatesEnabled=false;fs.writeFileSync('config/local-development.json',JSON.stringify(p,null,2)+'\n')"
+EOF
+  exit 1
+fi
+
+if [[ "${1:-}" == "--rebuild" ]]; then
+  if [[ ! -f "$PNPM_CJS" ]]; then
+    echo "error: pnpm not found at $PNPM_CJS" >&2
+    echo "install it with: corepack download pnpm@11.5.2" >&2
+    exit 1
+  fi
+  echo "rebuilding bundle..."
+  # The system corepack shim is too old for Node 24, so call pnpm.cjs directly.
+  node "$PNPM_CJS" run build:rolldown
+fi
+
+if [[ ! -d node_modules ]]; then
+  echo "error: node_modules missing - run the install first (see notes/plans)" >&2
+  exit 1
+fi
+
+# electron directly rather than `pnpm start`, so launching needs no pnpm at all.
+exec env NODE_ENV=development ./node_modules/.bin/electron .

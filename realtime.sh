@@ -1,0 +1,1 @@
+/home/dcar/dtu/realtime-translate/run.sh

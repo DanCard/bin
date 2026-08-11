@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#
+# cleanup-old-files - Safely delete files older than a specified number of days, excluding git-related files.
+
+set -euo pipefail
+
+echo "Deleting old meeting recordings"
+find ~/dtu/audio-record/ -name ".git" -prune -o  -mtime +60 -exec rm -v {} +
+echo "Deleting empty directories"
+find ~/dtu/audio-record/ -depth ! -path "*/.git*" -type d -empty -mtime +60 -exec rmdir {} \;
