@@ -28,6 +28,10 @@ TOP_N=3
 TEMP_N=4
 TEMP_DECIMALS=0
 TEMP_LABEL_WIDTH=6
+# Display widths (in characters, not bytes) of the two numeric fields in a
+# temperature cell. Celsius grows with TEMP_DECIMALS: "100°"=4, "45.5°"=5.
+TEMP_C_WIDTH=$(( 4 + (TEMP_DECIMALS > 0 ? TEMP_DECIMALS + 1 : 0) ))
+TEMP_F_WIDTH=4
 PROC_NAME_WIDTH=15
 COMM_WIDTH=15
 LOG_RETENTION_DAYS=180
@@ -227,9 +231,20 @@ format_temp_cf() {
     printf "%s %3d°F" "$celsius" "$fahrenheit"
 }
 
-c_to_f() {
+format_temp_f() {
     local millidegrees="$1"
-    printf "%3d°F   " "$(( (millidegrees * 9 / 5 + 32000) / 1000 ))"
+    printf "%d°" "$(( (millidegrees * 9 / 5 + 32000) / 1000 ))"
+}
+
+# Pad/truncate to a display width measured in characters, not bytes.
+# printf's field widths count bytes and "°" is two bytes in UTF-8, so
+# "%5s" on "38°" produces four display columns instead of five, and
+# "%6.6s" can slice a "°" in half. These helpers keep the log columns
+# aligned regardless of how many multi-byte characters a field contains.
+pad_left() {
+    local str="$1" width="$2"
+    (( ${#str} > width )) && str="${str:0:width}"
+    printf "%*s%s" "$(( width - ${#str} ))" "" "$str"
 }
 
 read_file_or() {
@@ -365,6 +380,8 @@ normalize_sensor_name() {
 
     if [[ "$base_name" == r8169_* ]]; then
         base_name="r8169"
+    elif [[ "$base_name" == acpitz_* ]]; then
+        base_name="acpitz"
     elif [[ "$base_name" == mt7925_phy* ]]; then
         base_name="mt7925"
     elif [[ "$base_name" =~ ^nvme([0-9]+)$ ]]; then
@@ -383,6 +400,8 @@ normalize_sensor_name() {
     if [[ -n "$base_name" ]]; then
         if [[ "$base_name" == "r8169" && "$label" == "1" ]]; then
             sensor="r8169"
+        elif [[ "$base_name" == "acpitz" && "$label" == "1" ]]; then
+            sensor="acpitz"
         elif [[ "$base_name" == "mt7925" && "$label" == "1" ]]; then
             sensor="mt7925"
         elif [[ "$base_name" == nvm* && "$label" == "Composite" ]]; then
@@ -402,7 +421,6 @@ normalize_sensor_name() {
 get_temp_summary() {
     local hwmon_dir temp_file temp_value sensor_name sensor_identifier label thermal_zone
     local collected sorted temp_accum_output="" dev_path dev_id
-    local first_non_acpi=1
 
     collected=""
     for hwmon_dir in /sys/class/hwmon/hwmon*; do
@@ -447,16 +465,17 @@ get_temp_summary() {
     fi
 
     # Always place acpitz first (if available), then fill remaining slots
-    # with hottest non-acpitz sensors.
+    # with hottest non-acpitz sensors. The prefix match is deliberately loose:
+    # the hwmon name is "acpitz_0" on this machine, not a bare "acpitz".
     local acpi_first non_acpi_sorted
     acpi_first=$(printf "%s\n" "$collected" \
-        | awk -F'|' '$2 ~ /^acpitz(\/|$)/' \
+        | awk -F'|' '$2 ~ /^acpitz/' \
         | sort -t'|' -k1,1nr \
         | head -n 1)
 
     if [[ -n "$acpi_first" ]]; then
         non_acpi_sorted=$(printf "%s\n" "$collected" \
-            | awk -F'|' '$2 !~ /^acpitz(\/|$)/' \
+            | awk -F'|' '$2 !~ /^acpitz/' \
             | sort -t'|' -k1,1nr)
         sorted=$(
             {
@@ -491,69 +510,38 @@ get_temp_summary() {
         # Already have enough items? Stop now.
         (( count >= TEMP_N )) && break
 
-        local label
+        # acpitz is pinned to the first slot, so its name carries no information
+        # and is omitted entirely -- label field and all, rather than padded to
+        # blank, which would leave a wide gap before the second reading. Rows
+        # stay aligned with each other because acpitz is always slot 1.
+        local label="$sensor"
+        [[ "$sensor" == acpitz* ]] && label=""
 
-        if [[ "$sensor" == acpitz* ]]; then
-            label=$(c_to_f "$millidegrees")
-        else
-            label="$sensor"
-        fi
-
-        if [[ "$sensor" != acpitz* ]] && (( first_non_acpi )); then
-            # Format temperature string for non-ACPI sensors with both Celsius and Fahrenheit values
-            # Printf format specifiers breakdown:
-            #   %5s      - First argument: Celsius temperature string (e.g., "45.5°C"), right-aligned in 5-character field
-            #   %3d°F    - Second argument: Fahrenheit temperature integer (e.g., "114"), right-aligned in 3-char field, followed by °F
-            #   %*.*s    - Third argument: Sensor label string, using dynamic width and precision
-            #       - *   - Field width taken from argument (fourth argument: $TEMP_LABEL_WIDTH)
-            #       - .*  - Precision taken from argument (fifth argument: $TEMP_LABEL_WIDTH)
-            #       - s   - String type, right-aligned (no leading minus sign)
-            # Why dynamic width and precision (* vs hardcoded number)?
-            #   1. Configurable column width - TEMP_LABEL_WIDTH can be adjusted in one place to change all label column spacing
-            #   2. Consistent alignment - All sensor labels use the same width value, ensuring uniform formatting
-            #   3. Flexible formatting - Same printf format works regardless of actual width setting (e.g., change from 15 to 20 without editing format string)
-            #   4. Maintainability - Single source of truth vs hardcoding numbers like %15.15s scattered throughout
-            # Arguments breakdown:
-            #   $(format_temp_c "$millidegrees") - Converts millidegrees to formatted Celsius string (e.g., 45000 → "45.0°C")
-            #   $(( (millidegrees * 9 / 5 + 32000) / 1000 )) - Fahrenheit conversion formula:
-            #       - millidegrees * 9 / 5      - Convert millidegrees Celsius to millidegrees Fahrenheit
-            #       - + 32000                    - Add 32 degrees in millidegree units (32 * 1000)
-            #       - / 1000                     - Convert millidegrees to whole degrees (integer division truncates)
-            #       Example: 45000 millidegrees → (45000 * 9 / 5 + 32000) / 1000 = 113000 / 1000 = 113°F
-            #   $TEMP_LABEL_WIDTH              - Variable controlling label column width for alignment
-            #   $label                         - Sensor identifier string to display in the label column
-            temp_formatted=$(printf "%5s%3d°%*.*s" "$(format_temp_c "$millidegrees")" "$(( (millidegrees * 9 / 5 + 32000) / 1000 ))" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
-            first_non_acpi=0
-        else
-            # Format temperature string for ACPI sensors (or subsequent sensors) with only Celsius value
-            # Printf format specifiers breakdown:
-            #   %5s      - First argument: Celsius temperature string (e.g., "45.5°C"), right-aligned in 5-character field
-            #   %*.*s    - Second argument: Sensor label string, using dynamic width and precision
-            #       - *   - Field width taken from argument (third argument: $TEMP_LABEL_WIDTH)
-            #       - .*  - Precision taken from argument (fourth argument: $TEMP_LABEL_WIDTH)
-            #       - s   - String type, right-aligned (no leading minus sign)
-            # Why dynamic width and precision (* vs hardcoded number)?
-            #   1. Configurable column width - TEMP_LABEL_WIDTH can be adjusted in one place to change all label column spacing
-            #   2. Consistent alignment - All sensor labels use the same width value, ensuring uniform formatting
-            #   3. Flexible formatting - Same printf format works regardless of actual width setting (e.g., change from 15 to 20 without editing format string)
-            #   4. Maintainability - Single source of truth vs hardcoding numbers like %15.15s scattered throughout
-            # Arguments breakdown:
-            #   $(format_temp_c "$millidegrees") - Converts millidegrees to formatted Celsius string (e.g., 45000 → "45.0°C")
-            #   $TEMP_LABEL_WIDTH              - Variable controlling label column width for alignment
-            #   $label                         - Sensor identifier string to display in the label column
-            # Note: This format is used for ACPI sensors because Fahrenheit is redundant (displayed separately)
-            temp_formatted=$(printf "%5s%*.*s" "$(format_temp_c "$millidegrees")" "$TEMP_LABEL_WIDTH" "$TEMP_LABEL_WIDTH" "$label")
-        fi
+        # Every cell has the same shape, so the columns line up no matter which
+        # sensor sorts where:
+        #   <Celsius right-aligned><Fahrenheit right-aligned><label right-aligned>
+        # e.g. " 45°113° r8169". All three fields are padded by character count
+        # (see pad_left) because "°" is two bytes in UTF-8 and printf's own
+        # field widths count bytes.
+        # Every field is right-aligned so its slack sits at the *start* of the
+        # field. Combined with the single-space separator that keeps the visible
+        # gap between cells at two spaces regardless of label length: one
+        # separator plus the one-space pad of the next cell's 2-digit Celsius.
+        temp_formatted="$(pad_left "$(format_temp_c "$millidegrees")" "$TEMP_C_WIDTH")"
+        temp_formatted+="$(pad_left "$(format_temp_f "$millidegrees")" "$TEMP_F_WIDTH")"
+        [[ -n "$label" ]] && temp_formatted+="$(pad_left "$label" "$TEMP_LABEL_WIDTH")"
 
         if [[ -z "$temp_accum_output" ]]; then
             temp_accum_output="$temp_formatted"
         else
-            temp_accum_output="$temp_accum_output  $temp_formatted"
+            temp_accum_output="$temp_accum_output $temp_formatted"
         fi
         (( count++ ))
     done <<< "$sorted"
 
-    printf "%s" "$temp_accum_output"
+    # Right-aligned fields should never leave trailing padding, but strip any
+    # so lines without event markers cannot end in whitespace.
+    printf "%s" "${temp_accum_output%"${temp_accum_output##*[![:space:]]}"}"
 }
 
 get_top_procs() {
