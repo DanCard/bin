@@ -10,37 +10,39 @@ from tqdm import tqdm
 LLAMA_URL = "http://localhost:8080"
 DEFAULT_MAX_TOKENS = -1
 
-PROMPTS = {
-    "long": {
-        "system": (
-            "You are an expert transcription analyst. Produce a verbatim-adjacent, exhaustive report of the meeting. "
-            "Capture the full depth of technical discussions, side-bars, and nuanced context. Do not omit details for brevity. "
-            "Use markdown formatting with clear headers, numbered and bullet points, and tables for structured data."
-        ),
-        "user_prefix": (
-            "Here is the full transcript of a meeting. Provide an incredibly detailed record covering every topic, "
-            "every decision, and every specific detail mentioned. Use inline quotes for significant statements. "
-            "Include a list of attendees and table or list of action items. "
-            "If someone spends time introducing them self, capture the introduction in extreme "
-            "detail as a topic or subtopic — name, role, organization, background, anything else they say about themselves, and inline quotes."
-        ),
-    },
-    "short": {
-        "system": (
-            "You are an expert transcription analyst. Produce clear, well-organized meeting notes from the transcript. "
-            "Use markdown formatting with clear headers, numbered points, bullet points, and tables for structured data."
-        ),
-        "user_prefix": (
-            "Here is the full transcript of a meeting. Generate meeting notes covering every topic discussed in detail, decisions made, and action items. "
-            "If someone spends time introducing them self, capture the introduction in extreme "
-            "detail as a topic or subtopic — name, role, organization, background, anything else they say about themselves, and inline quotes. "
-            "Include a list of attendees, decisions made, and a table of action items."
-        ),
-    },
-}
+# ---------------------------------------------------------------------------
+# The prompt. Tuned to land around 3,000 words on a ~12,000-word transcript:
+# full topic hierarchy, named side-bars, attendee list, action-item table.
+# A bare "Summarize this meeting transcript." with no system message lands
+# near 1,200 words, which loses the side-bars and the attendee list.
+#
+# SYSTEM_PROMPT = "" sends no system message at all.
+# ---------------------------------------------------------------------------
 
-# Output files are <dir>/summary-<mode>-<name>.md, one per mode.
-JOBS = ["long"]
+# Without this, the model re-transcribes the meeting: asking for detail and for
+# "inline quotes" together turns nearly every bullet into a verbatim quote.
+QUOTE_RULES = (
+    "Write in your own words. Paraphrase by default — the report is a summary, not a re-transcription. "
+    "Reserve verbatim quotes for statements whose exact wording matters: a commitment or decision, "
+    "a striking or contentious claim, a precise technical figure attributed to a person, or a memorable turn of phrase. "
+    "Use at most one or two quotes per topic, each under about 20 words. "
+    "Never quote routine remarks, small talk, questions, filler, or anything you could state just as well yourself. "
+    "Attribute information to the speaker in plain prose (e.g. 'Jonny reported that ...') instead of quoting them."
+)
+
+SYSTEM_PROMPT = (
+    "You are an expert transcription analyst. Produce an exhaustive report of the meeting. "
+    "Capture the full depth of technical discussions, side-bars, and nuanced context. "
+    + QUOTE_RULES + " "
+    "Use markdown formatting with clear headers, numbered and bullet points, and tables for structured data."
+)
+
+USER_PROMPT = (
+    "Here is the full transcript of a meeting. "
+    "Include a list of attendees and action items. "
+    "If someone spends time introducing them self, capture the introduction in extreme "
+    "detail as a topic or subtopic — name, role, organization, background, and anything else they say about themselves."
+)
 
 
 def get_loaded_model(url):
@@ -53,20 +55,20 @@ def get_loaded_model(url):
         return None
 
 
-def generate_summary(transcript, output_path, max_tokens, url, mode, model_id):
+def generate_summary(transcript, output_path, max_tokens, url, model_id):
     """Send the transcript to the server and stream the response to a file."""
-    prompts = PROMPTS[mode]
-
-    print(f"📝 Generating {mode} notes → {output_path}")
+    print(f"📝 Generating notes → {output_path}")
     print(f"💡 Monitor progress in another terminal: tail -f '{output_path}'")
     print("-" * 40)
 
+    messages = []
+    if SYSTEM_PROMPT:
+        messages.append({"role": "system", "content": SYSTEM_PROMPT})
+    messages.append({"role": "user", "content": f"{USER_PROMPT}\n\n{transcript}"})
+
     payload = {
         "model": model_id,
-        "messages": [
-            {"role": "system", "content": prompts["system"]},
-            {"role": "user", "content": f"{prompts['user_prefix']}\n\n{transcript}"}
-        ],
+        "messages": messages,
         "max_tokens": max_tokens,
         "temperature": 0,
         "stream": True,
@@ -157,7 +159,7 @@ def generate_summary(transcript, output_path, max_tokens, url, mode, model_id):
                                 gen_bar.set_postfix_str(f"{tps:.1f} tok/s")
 
         close_bars()
-        print(f"\n✅ {mode.capitalize()} notes saved to: {output_path}")
+        print(f"\n✅ Notes saved to: {output_path}")
 
     except requests.exceptions.RequestException as e:
         close_bars()
@@ -166,15 +168,14 @@ def generate_summary(transcript, output_path, max_tokens, url, mode, model_id):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate meeting notes using the currently served local LLM "
-                    "(defaults to long record)."
+        description="Generate meeting notes using the currently served local LLM."
     )
     parser.add_argument("transcript", help="Path to the transcript text file.")
     parser.add_argument(
         "output",
         nargs="?",
-        help="Base path for output files (default: the transcript path). "
-             "Outputs are summary-long-<name>.md (and summary-short-<name>.md if short version requested) in the base's directory."
+        help="Base path for the output file (default: the transcript path). "
+             "Output is summary-<name>.md in the base's directory."
     )
     parser.add_argument(
         "--max-tokens",
@@ -187,13 +188,11 @@ def main():
         default=LLAMA_URL,
         help=f"llama-server URL (default: {LLAMA_URL})."
     )
-    select = parser.add_mutually_exclusive_group()
-    select.add_argument("--long-only", action="store_true",
-                        help="Only generate the long record (default).")
-    select.add_argument("--short-only", "--short", action="store_true",
-                        help="Only generate the short summary notes.")
-    select.add_argument("--with-short", "--both", action="store_true",
-                        help="Generate both long and short notes.")
+    parser.add_argument(
+        "-f", "--force",
+        action="store_true",
+        help="Overwrite the output file if it already exists (default: skip)."
+    )
 
     args = parser.parse_args()
 
@@ -209,14 +208,6 @@ def main():
     base_dir, base_name = os.path.split(base)
     prefix_name = base_name.removeprefix("summary-").removeprefix("summary_")
 
-    jobs = list(JOBS)
-    if args.short_only:
-        jobs = ["short"]
-    elif args.with_short:
-        jobs = ["long", "short"]
-    elif args.long_only:
-        jobs = ["long"]
-
     model_id = get_loaded_model(args.url)
     if model_id is None:
         print(f"❌ Error: No llama-server responding at {args.url}. Start one first.")
@@ -227,13 +218,12 @@ def main():
         transcript = f.read()
     print(f"📖 Read transcript from {args.transcript} ({len(transcript)} chars)")
 
-    for mode in jobs:
-        output_path = os.path.join(base_dir, f"summary-{mode}-{prefix_name}.md")
-        if os.path.exists(output_path):
-            print(f"⚠️ Output file already exists: {output_path}. Skipping.")
-            continue
-        generate_summary(transcript, output_path, args.max_tokens,
-                         args.url, mode, model_id)
+    output_path = os.path.join(base_dir, f"summary-{prefix_name}.md")
+    if os.path.exists(output_path) and not args.force:
+        print(f"⚠️ Output file already exists: {output_path}. "
+              f"Skipping (use --force to overwrite).")
+        return
+    generate_summary(transcript, output_path, args.max_tokens, args.url, model_id)
 
 
 if __name__ == "__main__":
