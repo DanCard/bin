@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import argparse
+import requests
+from tqdm import tqdm
+
+# Configuration
+LLAMA_URL = "http://localhost:8080"
+DEFAULT_MAX_TOKENS = -1
+
+# Quoting discipline shared by both modes. Without this, models re-transcribe
+# the meeting: nearly every bullet comes back as a verbatim quote.
+QUOTE_RULES = (
+    "Write in your own words. Paraphrase by default — the report is a summary, not a re-transcription. "
+    "Reserve verbatim quotes for statements whose exact wording matters: a commitment or decision, "
+    "a striking or contentious claim, a precise technical figure attributed to a person, or a memorable turn of phrase. "
+    "Use at most one or two quotes per topic, each under about 20 words. "
+    "Never quote routine remarks, small talk, questions, filler, or anything you could state just as well yourself. "
+    "Attribute information to the speaker in plain prose (e.g. 'Jonny reported that ...') instead of quoting them."
+)
+
+PROMPTS = {
+    "long": {
+        "system": (
+            "You are an expert transcription analyst. Produce an exhaustive report of the meeting. "
+            "Capture the full depth of technical discussions, side-bars, and nuanced context."
+            + QUOTE_RULES + " "
+            "Use markdown formatting with clear headers, numbered and bullet points, and tables for structured data."
+        ),
+        "user_prefix": (
+            "Here is the full transcript of a meeting. "
+            "Include a list of attendees and action items. "
+            "If someone spends time introducing them self, capture the introduction in extreme "
+            "detail as a topic or subtopic — name, role, organization, background, and anything else they say about themselves."
+        ),
+    },
+    "short": {
+        "system": (
+            "You are an expert transcription analyst. Produce clear, well-organized meeting notes from the transcript. "
+            + QUOTE_RULES + " "
+            "Use markdown formatting with clear headers, numbered points, bullet points, and tables for structured data."
+        ),
+        "user_prefix": (
+            "Here is the full transcript of a meeting. Generate meeting notes covering every topic discussed in detail, decisions made, and action items. "
+            "If someone spends time introducing them self, capture the introduction in extreme "
+            "detail as a topic or subtopic — name, role, organization, background, and anything else they say about themselves. "
+            "Include a list of attendees, decisions made, and a table of action items."
+        ),
+    },
+}
+
+# Output files are <dir>/summary-<mode>-<name>.md, one per mode.
+JOBS = ["long"]
+
+
+def get_loaded_model(url):
+    """Return the model id reported by a responding server, or None."""
+    try:
+        response = requests.get(f"{url}/v1/models", timeout=2)
+        response.raise_for_status()
+        return response.json()["data"][0]["id"]
+    except (requests.exceptions.RequestException, KeyError, IndexError, ValueError):
+        return None
+
+
+def generate_summary(transcript, output_path, max_tokens, url, mode, model_id):
+    """Send the transcript to the server and stream the response to a file."""
+    prompts = PROMPTS[mode]
+
+    print(f"📝 Generating {mode} notes → {output_path}")
+    print(f"💡 Monitor progress in another terminal: tail -f '{output_path}'")
+    print("-" * 40)
+
+    payload = {
+        "model": model_id,
+        "messages": [
+            {"role": "system", "content": prompts["system"]},
+            {"role": "user", "content": f"{prompts['user_prefix']}\n\n{transcript}"}
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0,
+        "stream": True,
+        "return_progress": True,    # prompt_progress: {total, cache, processed, time_ms}
+        "timings_per_token": True   # timings: {predicted_n, predicted_per_second, ...}
+    }
+
+    # Two-phase progress bars (render to stderr so stdout/tail -f stay clean).
+    # Phase 1: prompt ingestion (determinate % from prompt_progress).
+    # Phase 2: generation (token count + tok/s; determinate only if max_tokens > 0).
+    prompt_bar = None
+    gen_bar = None
+
+    def close_bars():
+        for bar in (prompt_bar, gen_bar):
+            if bar is not None:
+                bar.close()
+
+    try:
+        response = requests.post(
+            f"{url}/v1/chat/completions",
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            stream=True
+        )
+        response.raise_for_status()
+
+        with open(output_path, 'w') as f_out:
+            for line in response.iter_lines():
+                if line:
+                    decoded_line = line.decode('utf-8')
+                    if decoded_line.startswith("data: "):
+                        data_str = decoded_line[len("data: "):]
+                        if data_str.strip() == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+
+                        # Phase 1: prompt-processing progress. The server's
+                        # prompt_progress.total can undershoot the real prompt
+                        # size, making the bar hit 100% while prefill is still
+                        # running. Clamp total to the largest of total/n_prompt/
+                        # processed so it never shows 100% prematurely.
+                        progress = data.get("prompt_progress")
+                        if progress and gen_bar is None:
+                            total = progress.get("total", 0)
+                            processed = progress.get("processed", 0)
+                            n_prompt = progress.get("n_prompt_tokens", 0)
+                            total = max(total, n_prompt, processed)
+                            if prompt_bar is None:
+                                prompt_bar = tqdm(
+                                    total=total or None,
+                                    desc="Prompt", unit="tok", unit_scale=True,
+                                    file=sys.stderr, leave=True
+                                )
+                            if total and prompt_bar.total != total:
+                                prompt_bar.total = total
+                            prompt_bar.update(max(0, processed - prompt_bar.n))
+
+                        # Content tokens => generation phase has begun
+                        try:
+                            content = data['choices'][0]['delta'].get('content', '')
+                        except (KeyError, IndexError):
+                            content = ''
+                        timings = data.get("timings", {})
+
+                        if content or (timings and gen_bar is not None):
+                            if gen_bar is None:
+                                if prompt_bar is not None:
+                                    prompt_bar.close()
+                                gen_bar = tqdm(
+                                    total=(max_tokens if max_tokens and max_tokens > 0 else None),
+                                    desc="Generating", unit="tok", unit_scale=True,
+                                    file=sys.stderr, leave=True
+                                )
+                            if content:
+                                f_out.write(content)
+                                f_out.flush()
+                            predicted_n = timings.get("predicted_n")
+                            if predicted_n is not None:
+                                gen_bar.update(max(0, predicted_n - gen_bar.n))
+                            elif content:
+                                gen_bar.update(1)
+                            tps = timings.get("predicted_per_second")
+                            if tps is not None:
+                                gen_bar.set_postfix_str(f"{tps:.1f} tok/s")
+
+        close_bars()
+        print(f"\n✅ {mode.capitalize()} notes saved to: {output_path}")
+
+    except requests.exceptions.RequestException as e:
+        close_bars()
+        print(f"\n❌ Error calling llama-server: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate meeting notes using the currently served local LLM "
+                    "(defaults to long record)."
+    )
+    parser.add_argument("transcript", help="Path to the transcript text file.")
+    parser.add_argument(
+        "output",
+        nargs="?",
+        help="Base path for output files (default: the transcript path). "
+             "Outputs are summary-long-<name>.md (and summary-short-<name>.md if short version requested) in the base's directory."
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=DEFAULT_MAX_TOKENS,
+        help="Max output tokens (default: -1)."
+    )
+    parser.add_argument(
+        "--url",
+        default=LLAMA_URL,
+        help=f"llama-server URL (default: {LLAMA_URL})."
+    )
+    select = parser.add_mutually_exclusive_group()
+    select.add_argument("--long-only", action="store_true",
+                        help="Only generate the long record (default).")
+    select.add_argument("--short-only", "--short", action="store_true",
+                        help="Only generate the short summary notes.")
+    select.add_argument("--with-short", "--both", action="store_true",
+                        help="Generate both long and short notes.")
+
+    args = parser.parse_args()
+
+    if not os.path.exists(args.transcript):
+        print(f"❌ Error: File not found: {args.transcript}")
+        sys.exit(1)
+
+    base = args.output or args.transcript
+    if base.endswith(".md"):
+        base = base[:-len(".md")]
+    elif base.endswith(".txt"):
+        base = base[:-len(".txt")]
+    base_dir, base_name = os.path.split(base)
+    prefix_name = base_name.removeprefix("summary-").removeprefix("summary_")
+
+    jobs = list(JOBS)
+    if args.short_only:
+        jobs = ["short"]
+    elif args.with_short:
+        jobs = ["long", "short"]
+    elif args.long_only:
+        jobs = ["long"]
+
+    model_id = get_loaded_model(args.url)
+    if model_id is None:
+        print(f"❌ Error: No llama-server responding at {args.url}. Start one first.")
+        sys.exit(1)
+    print(f"🤖 Using served model: {model_id}")
+
+    with open(args.transcript, 'r', encoding='utf-8', errors='replace') as f:
+        transcript = f.read()
+    print(f"📖 Read transcript from {args.transcript} ({len(transcript)} chars)")
+
+    for mode in jobs:
+        output_path = os.path.join(base_dir, f"summary-{mode}-{prefix_name}.md")
+        if os.path.exists(output_path):
+            print(f"⚠️ Output file already exists: {output_path}. Skipping.")
+            continue
+        generate_summary(transcript, output_path, args.max_tokens,
+                         args.url, mode, model_id)
+
+
+if __name__ == "__main__":
+    main()
