@@ -7,10 +7,11 @@ FANS="fan1 fan2 fan3"
 
 usage() {
     local code="${1:-0}"
-    echo "Usage: $0 [status|apply|reset|probe|help]"
-    echo "  (no args)  Show current fan state"
+    echo "Usage: $0 [status|apply|reset|toggle|probe|help]"
+    echo "  (no args)  Toggle: reset if all fans are in curve mode, else apply"
     echo "  apply      Set curve mode with optimized thresholds"
     echo "  reset      Restore auto mode on all fans"
+    echo "  toggle     Same as no args"
     echo "  status     Show current fan state"
     echo "  probe      Probe EC codes on all fans"
     echo "  help       Show this help text"
@@ -138,12 +139,32 @@ do_curve() {
     do_status
 }
 
+# Direction is derived from the hardware, not a state file: only a clean
+# "every fan is in curve mode" counts as applied. Anything else — auto, fixed,
+# or a mix left behind by an interrupted probe — toggles toward apply, so a
+# partial state gets normalised instead of propagated.
+do_toggle() {
+    local fan mode applied=1
+    for fan in $FANS; do
+        mode=$(cat "$SYSFS/$fan/mode")
+        [ "$mode" = "curve" ] || applied=0
+    done
+
+    if [ "$applied" -eq 1 ]; then
+        log "=== Toggle: all fans in curve mode -> resetting to auto ==="
+        do_reset
+    else
+        log "=== Toggle: fans not all in curve mode -> applying curve ==="
+        do_curve
+    fi
+}
+
 case "${1:-}" in
     --help|-h|help)      usage ;;
     --apply|apply)       do_curve ;;
     --reset|reset)       do_reset ;;
+    --toggle|toggle|"")  do_toggle ;;
     --status|status)     do_status ;;
     --probe|probe)       do_probe ;;
-    "")                  do_status ;;
     *)                   echo "Unknown option/command: $1"; usage 1 ;;
 esac
