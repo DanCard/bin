@@ -24,7 +24,12 @@ fi
 
 if [ -n "$2" ]; then
     COUNT="$2"
+else
+    COUNT=3
 fi
+
+# ls -lth "$DIR" | head -n "$COUNT" | tail -n +2
+# exit 0
 
 # Check if directory exists
 if [ ! -d "$DIR" ]; then

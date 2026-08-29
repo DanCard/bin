@@ -22,6 +22,8 @@
 # - nvm <N>               = nvmeX/Sensor N (X = drive index)
 # - composite             = nvmeX/Composite
 # - F1, F2, F3            = AXB35 System Fans 1, 2, 3
+#                           (omitted entirely when the ec_su_axb35 module
+#                           is not loaded)
 
 LOG_DIR="$HOME/misc/logs"
 TOP_N=3
@@ -311,6 +313,27 @@ get_fan_rpms() {
         printf "%s %s %s" "$(sanitize_rpm "$fan1_rpm")" "$(sanitize_rpm "$fan2_rpm")" "$(sanitize_rpm "$fan3_rpm")"
     else
         printf "0 0 0"
+    fi
+}
+
+# The ec_su_axb35 kernel module is optional. When it is loaded, fan mode and
+# RPMs are read from /sys/class/ec_su_axb35; when it is not, the sysfs tree is
+# absent and fan fields are omitted from the log line (fan level is 0, so
+# level-based bursts are disabled too). The check is cheap and runs every loop,
+# so loading the module later is picked up without restarting the service.
+update_fan_state() {
+    if [ -d "$EC_PATH" ]; then
+        local fan1_rpm fan2_rpm fan3_rpm
+        FAN_STATUS=$(get_fan_mode)
+        read -r fan1_rpm fan2_rpm fan3_rpm <<< "$(get_fan_rpms)"
+        FAN_RPM_SUMMARY=$(printf "%5d%5d%5d" "$fan1_rpm" "$fan2_rpm" "$fan3_rpm")
+        FAN_BLOCK="$FAN_STATUS$FAN_RPM_SUMMARY"
+        NEXT_FAN_LEVEL=$(get_effective_level_from_rpms "$fan1_rpm" "$fan2_rpm" "$fan3_rpm")
+    else
+        FAN_STATUS=""
+        FAN_RPM_SUMMARY=""
+        FAN_BLOCK=""
+        NEXT_FAN_LEVEL=0
     fi
 }
 
@@ -695,10 +718,9 @@ fi
 log_screen_debug "startup state=$INITIAL_SCREEN_STATE"
 
 # Bootstrap fan snapshot so first-loop burst logic has a valid input.
-FAN_STATUS=$(get_fan_mode)
-read -r FAN1_RPM_VALUE FAN2_RPM_VALUE FAN3_RPM_VALUE <<< "$(get_fan_rpms)"
-FAN_RPM_SUMMARY=$(printf "%5d%5d%5d" "$FAN1_RPM_VALUE" "$FAN2_RPM_VALUE" "$FAN3_RPM_VALUE")
-EFFECTIVE_FAN_LEVEL=$(get_effective_level_from_rpms "$FAN1_RPM_VALUE" "$FAN2_RPM_VALUE" "$FAN3_RPM_VALUE")
+FAN_BLOCK=""
+update_fan_state
+EFFECTIVE_FAN_LEVEL="$NEXT_FAN_LEVEL"
 
 LAST_CLEANUP_DATE=""
 while true; do
@@ -862,10 +884,8 @@ while true; do
     fi
 
     # Read fan state after top so logged fan values align with sampled procs.
-    FAN_STATUS=$(get_fan_mode)
-    read -r FAN1_RPM_VALUE FAN2_RPM_VALUE FAN3_RPM_VALUE <<< "$(get_fan_rpms)"
-    FAN_RPM_SUMMARY=$(printf "%5d%5d%5d" "$FAN1_RPM_VALUE" "$FAN2_RPM_VALUE" "$FAN3_RPM_VALUE")
-    NEXT_FAN_LEVEL=$(get_effective_level_from_rpms "$FAN1_RPM_VALUE" "$FAN2_RPM_VALUE" "$FAN3_RPM_VALUE")
+    # If the ec_su_axb35 module is not loaded, fan fields are omitted.
+    update_fan_state
 
     EVENT_MARKER_SUFFIX=""
     if [[ -n "$EVENT_MARKERS" ]]; then
@@ -876,7 +896,12 @@ while true; do
         EVENT_MARKERS=""
         persist_event_markers
     fi
-    echo "$LOG_TIMESTAMP $TOP_PROCESSES  $FAN_STATUS$FAN_RPM_SUMMARY$TEMPERATURE_BLOCK   $TEMPERATURE_SUMMARY$EVENT_MARKER_SUFFIX" >> "$LOG_DIR/$LOG_PREFIX-$LOG_DATE.log"
+    if [[ -n "$FAN_BLOCK" ]]; then
+        FAN_LOGGED="  $FAN_BLOCK"
+    else
+        FAN_LOGGED=""
+    fi
+    echo "$LOG_TIMESTAMP $TOP_PROCESSES$FAN_LOGGED$TEMPERATURE_BLOCK   $TEMPERATURE_SUMMARY$EVENT_MARKER_SUFFIX" >> "$LOG_DIR/$LOG_PREFIX-$LOG_DATE.log"
     EFFECTIVE_FAN_LEVEL="$NEXT_FAN_LEVEL"
     # Safety delay prevents busy-looping if top fails or is interrupted.
     sleep "$LOOP_SAFETY_SLEEP"
